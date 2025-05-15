@@ -1,0 +1,15 @@
+Host fish_bastion
+    HostName 
+    User ubuntu
+    IdentityFile mykey.pub
+
+Host fish_proxy1
+    HostName 
+    User ubuntu
+    IdentityFile mykey.pub
+
+Host fish_proxy2
+    HostName 37.153.139.166
+    User ubuntu
+    IdentityFile mykey.pub
+

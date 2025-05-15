@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# Usage check
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <openrc> <tag>"
+    exit 1
+fi
+
+OPENRC="$1"
+TAG="$2"
+
+KEY_NAME="${TAG}_key"
+SEC_GROUP="${TAG}_secgroup"
+NETWORK="${TAG}_network"
+SUBNET="${TAG}_subnet"
+ROUTER="${TAG}_router"
+
+source "$OPENRC"
+
+log() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
+}
+
+log "[*] Starting cleanup for tag: $TAG"
+
+# Delete servers by name prefix (using tag as prefix)
+log "Deleting servers with name prefix '${TAG}_'..."
+for ID in $(openstack server list --name "^${TAG}_" -f value -c ID); do
+    log "Deleting server $ID"
+    openstack server delete "$ID"
+done
+
+# Wait for servers to be gone (timeout after 5 minutes)
+log "Waiting for servers to terminate..."
+timeout=300
+elapsed=0
+while openstack server list --name "^${TAG}_" -f value -c ID | grep -q .; do
+    sleep 5
+    elapsed=$((elapsed + 5))
+    if [ "$elapsed" -ge "$timeout" ]; then
+        log "Timeout waiting for servers to terminate. Continuing cleanup."
+        break
+    fi
+done
+
+# Delete unused floating IPs that are DOWN (likely detached)
+log "Deleting unused floating IPs..."
+for FIP in $(openstack floating ip list --status DOWN -f value -c "ID"); do
+    log "Deleting floating IP $FIP"
+    openstack floating ip delete "$FIP"
+done
+
+# Delete ports on the network to allow subnet deletion
+if openstack network show "$NETWORK" &>/dev/null; then
+    log "Deleting ports on network $NETWORK..."
+    for PORT_ID in $(openstack port list --network "$NETWORK" -f value -c ID); do
+        log "Deleting port $PORT_ID"
+        openstack port delete "$PORT_ID"
+    done
+fi
+
+# Remove subnet interface from router before deleting router
+if openstack router show "$ROUTER" &>/dev/null; then
+    if openstack subnet show "$SUBNET" &>/dev/null; then
+        log "Removing subnet $SUBNET from router $ROUTER"
+        openstack router remove subnet "$ROUTER" "$SUBNET"
+    fi
+    log "Deleting router $ROUTER"
+    openstack router delete "$ROUTER"
+fi
+
+# Delete subnet
+if openstack subnet show "$SUBNET" &>/dev/null; then
+    log "Deleting subnet $SUBNET"
+    openstack subnet delete "$SUBNET"
+fi
+
+# Delete network
+if openstack network show "$NETWORK" &>/dev/null; then
+    log "Deleting network $NETWORK"
+    openstack network delete "$NETWORK"
+fi
+
+# Delete security group
+if openstack security group show "$SEC_GROUP" &>/dev/null; then
+    log "Deleting security group $SEC_GROUP"
+    openstack security group delete "$SEC_GROUP"
+fi
+
+# Delete keypair
+if openstack keypair show "$KEY_NAME" &>/dev/null; then
+    log "Deleting keypair $KEY_NAME"
+    openstack keypair delete "$KEY_NAME"
+fi
+
+log "[✓] Cleanup complete."
