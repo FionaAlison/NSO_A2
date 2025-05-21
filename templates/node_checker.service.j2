@@ -1,0 +1,12 @@
+[Unit]
+Description=Node Health Checker
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/node_checker.py
+Restart=always
+User=root
+Environment=NODE_IPS={% for host in groups['nodes'] %}"{{ hostvars[host]['ansible_default_ipv4']['address'] }}"{% if not loop.last %},{% endif %}{% endfor %}
+
+[Install]
+WantedBy=multi-user.target

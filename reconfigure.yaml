@@ -1,0 +1,71 @@
+- name: Reconfigure newly deployed service nodes
+  hosts: nodes
+  become: yes
+  tasks:
+    - name: Update apt cache and install required packages
+      apt:
+        update_cache: yes
+        name:
+          - python3
+          - python3-pip
+          - python3-flask
+          - snmpd
+        state: present
+
+    - name: Deploy Flask service code
+      copy:
+        src: service.py
+        dest: /usr/local/bin/service.py
+        mode: '0755'
+
+    - name: Configure SNMP daemon
+      template:
+        src: templates/snmpd.conf.j2
+        dest: /etc/snmp/snmpd.conf
+      notify:
+        - restart snmpd
+
+    - name: Ensure SNMP service is started and enabled
+      service:
+        name: snmpd
+        state: started
+        enabled: yes
+
+    - name: Deploy systemd unit for Flask service
+      template:
+        src: templates/service.service.j2
+        dest: /etc/systemd/system/service.service
+      notify:
+        - daemon-reload
+        - restart flask
+        - enable flask
+
+    - name: Ensure necessary firewall ports are open (optional, if UFW is used)
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 5000  # Flask service
+        - 161   # SNMP
+
+  handlers:
+    - name: restart snmpd
+      service:
+        name: snmpd
+        state: restarted
+
+    - name: daemon-reload
+      systemd:
+        daemon_reload: yes
+
+    - name: restart flask
+      service:
+        name: service
+        state: restarted
+
+    - name: enable flask
+      service:
+        name: service
+        enabled: yes
+        state: started

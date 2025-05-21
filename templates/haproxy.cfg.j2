@@ -1,12 +1,17 @@
 global
     log /dev/log local0
     maxconn 4096
+    stats socket /run/haproxy/admin.sock mode 660 level admin
+    stats timeout 30s
 
 defaults
+    log global
     mode http
+    option httplog
+    option dontlognull
     timeout connect 5s
-    timeout client  50s
-    timeout server  50s
+    timeout client 50s
+    timeout server 50s
 
 frontend http-in
     bind *:5000
@@ -14,6 +19,14 @@ frontend http-in
 
 backend service-backend
     balance roundrobin
-    server node1 192.168.42.101:6000 check
-    server node2 192.168.42.102:6000 check
-    server node3 192.168.42.103:6000 check
+    option httpchk GET /health
+    {% for node in groups['nodes'] %}
+    server {{ node }} {{ hostvars[node]['ansible_default_ipv4']['address'] }}:5000 check
+    {% endfor %}
+
+listen stats
+    bind *:8404
+    stats enable
+    stats uri /stats
+    stats refresh 10s
+    stats admin if TRUE

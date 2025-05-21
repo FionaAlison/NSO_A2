@@ -1,0 +1,13 @@
+[Unit]
+Description=Project Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/service.py
+Restart=always
+User=root
+Environment=FLASK_ENV=production
+WorkingDirectory=/usr/local/bin
+
+[Install]
+WantedBy=multi-user.target

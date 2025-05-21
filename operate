@@ -1,0 +1,157 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ $# -ne 3 ]]; then
+  echo "Usage: $0 <openrc> <tag> <ssh_key>"
+  exit 1
+fi
+
+OPENRC="$1"
+TAG="$2"
+SSH_KEY="$3"
+KEY_NAME="${TAG}_key"
+SEC_GROUP="${TAG}_secgroup"
+IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"
+FLAVOR="1C-0.5GB-50GB"
+
+source "$OPENRC"
+
+INVENTORY_FILE="${TAG}_inventory.ini"
+TEMP_NEW_NODES_INVENTORY="/tmp/${TAG}_new_nodes_inventory.ini"
+> "$TEMP_NEW_NODES_INVENTORY"
+
+log() {
+  echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
+}
+
+get_desired_count() {
+  head -n1 servers.conf 2>/dev/null | tr -d '[:space:]' || echo 3
+}
+
+get_bastion_ip() {
+  openstack server show "${TAG}_bastion" -f json | \
+    jq -r '.addresses' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -vE '^(10|192\.168|172\.(1[6-9]|2[0-9]|3[0-1]))' | head -n 1
+}
+
+get_healthy_nodes() {
+  local bastion_ip="$1"
+  local tmpfile="/tmp/nodes.list"
+  local node_prefix="${TAG}_node"
+
+  local node_ips
+  node_ips=$(awk -v prefix="$node_prefix" '
+    /^\[nodes\]/ {flag=1; next}
+    /^\[/ {flag=0}
+    flag && $1 ~ "^"prefix {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^ansible_host=/) {
+          split($i, a, "=")
+          print a[2]
+        }
+      }
+    }' "$INVENTORY_FILE")
+
+  [[ -z "$node_ips" ]] && return
+
+  printf "%s\n" $node_ips | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
+    "bash -c 'cat > \"$tmpfile\"'"
+
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
+    "curl -s http://localhost:5000/health" 2>/dev/null | jq -r '.healthy_nodes[]' || true
+}
+
+scale_up() {
+  local count="$1"
+  (( count == 0 )) && log "No nodes to scale up." && return
+
+  log "Launching $count new node(s)."
+  declare -a new_nodes=()
+
+  max_num=$(openstack server list -f json | jq -r --arg tag "$TAG" \
+    '.[] | select(.Name | startswith($tag+"_node")) | .Name | capture("node(?<num>\\d+)") | .num | tonumber' | sort -nr | head -n1)
+  max_num=${max_num:-0}
+
+  for i in $(seq 1 "$count"); do
+    NODE_NUM=$((max_num + i))
+    NODE_NAME="${TAG}_node${NODE_NUM}"
+    USERDATA_FILE=$(mktemp)
+
+    cat > "$USERDATA_FILE" <<EOF
+#cloud-config
+ssh_authorized_keys:
+  - $(cat ${SSH_KEY}.pub)
+EOF
+
+    openstack server create \
+      --image "$IMAGE_NAME" \
+      --flavor "$FLAVOR" \
+      --key-name "$KEY_NAME" \
+      --security-group "$SEC_GROUP" \
+      --network "${TAG}_network" \
+      --user-data "$USERDATA_FILE" \
+      --property "tag=${TAG}" \
+      "$NODE_NAME" &
+
+    new_nodes+=("$NODE_NAME")
+  done
+
+  wait
+  sleep 20
+
+  BASTION_IP=$(get_bastion_ip)
+
+  echo -e "\n[nodes]" >> "$TEMP_NEW_NODES_INVENTORY"
+
+  for NODE_NAME in "${new_nodes[@]}"; do
+    IP=$(openstack server show "$NODE_NAME" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+    echo "$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$BASTION_IP'" >> "$TEMP_NEW_NODES_INVENTORY"
+    echo "$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$BASTION_IP'" >> "$INVENTORY_FILE"
+  done
+
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml
+}
+
+scale_down() {
+  local count="$1"
+  (( count == 0 )) && log "No nodes to scale down." && return
+
+  log "Removing $count node(s)."
+
+  mapfile -t old_nodes < <(openstack server list -f json | \
+    jq -r --arg tag "$TAG" '.[] | select(.Properties.tag == $tag and (.Name | test("node"))) | .Name' | sort | head -n "$count")
+
+  for node in "${old_nodes[@]}"; do
+    log "Deleting $node"
+    openstack server delete "$node" &
+    sed -i "/^$node\s/d" "$INVENTORY_FILE"
+  done
+
+  wait
+}
+
+# Main loop
+log "Starting operate mode (30-second checks)..."
+
+while true; do
+  DESIRED=$(get_desired_count)
+  log "Target node count from config: $DESIRED"
+
+  BASTION_IP=$(get_bastion_ip)
+  [[ -z "$BASTION_IP" ]] && log "Could not get Bastion IP. Retrying in 30s..." && sleep 30 && continue
+
+  mapfile -t CURRENT_NODES < <(get_healthy_nodes "$BASTION_IP" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  CURRENT_COUNT=${#CURRENT_NODES[@]}
+  log "Current healthy nodes: $CURRENT_COUNT"
+
+  if (( CURRENT_COUNT < DESIRED )); then
+    MISSING_COUNT=$((DESIRED - CURRENT_COUNT))
+    scale_up "$MISSING_COUNT"
+  elif (( CURRENT_COUNT > DESIRED )); then
+    EXTRA_COUNT=$((CURRENT_COUNT - DESIRED))
+    scale_down "$EXTRA_COUNT"
+  else
+    log "Cluster size is optimal. Sleeping."
+  fi
+
+  sleep 30
+done

@@ -1,0 +1,13 @@
+[Unit]
+Description=Node Health Check Endpoint
+After=network.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/opt
+EnvironmentFile=/etc/environment
+ExecStart=/usr/bin/python3 /opt/health_endpoint.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -1,15 +1,45 @@
 Host fish_bastion
-    HostName 
-    User ubuntu
-    IdentityFile mykey.pub
+  HostName 188.240.223.109
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
 
 Host fish_proxy1
-    HostName 
-    User ubuntu
-    IdentityFile mykey.pub
+  HostName 46.254.9.160
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
 
 Host fish_proxy2
-    HostName 37.153.139.166
-    User ubuntu
-    IdentityFile mykey.pub
+  HostName 31.12.86.75
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host fish_node1
+  HostName 192.168.42.29
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@188.240.223.109
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host fish_node2
+  HostName 192.168.42.103
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@188.240.223.109
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host fish_node3
+  HostName 192.168.42.141
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@188.240.223.109
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
 

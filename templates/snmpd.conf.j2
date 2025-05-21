@@ -1,0 +1,16 @@
+# SNMP Daemon Configuration
+agentAddress udp:6000
+rocommunity {{ snmp_community | default('public') }} 192.168.42.0/24
+sysLocation "{{ inventory_hostname }}"
+sysContact "Admin <admin@{{ inventory_hostname }}>"
+
+# System Monitoring
+view systemonly included .1.3.6.1.2.1.1
+view systemonly included .1.3.6.1.2.1.25.1
+
+# Service Monitoring
+pass .1.3.6.1.4.1.2021.2 /usr/bin/python3 /usr/local/bin/snmp_service_handler.py
+
+# Process Monitoring
+proc flask_service
+procfix /usr/local/bin/service.py

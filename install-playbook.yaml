@@ -1,35 +1,164 @@
 ---
-- name: Configure all nodes
+- name: Configure all nodes - Common Setup
   hosts: all
-  become: true
+  become: yes
   tasks:
-    - name: Update and install base packages
+    - name: Wait for apt lock
+      shell: while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 5; done
+
+    - name: Install base packages
       apt:
-        update_cache: yes
         name:
-          - vim
+          - python3
+          - python3-pip
+          - python3-flask
+          - snmpd
           - curl
+          - vim
           - net-tools
         state: present
+        update_cache: yes
 
-- name: Configure bastion
-  hosts: "{{ lookup('env', 'TAG') }}_bastion"
-  become: true
+- name: Configure bastion host - Monitoring stack
+  hosts: bastion
+  become: yes
   tasks:
-    - name: Install and configure SSH jump host
-      debug:
-        msg: "Bastion node ready (manual SSH jump configuration as needed)"
+    - name: Add InfluxData GPG key
+      apt_key:
+        url: https://repos.influxdata.com/influxdata-archive_compat.key
+        state: present
+
+    - name: Add InfluxDB repository
+      apt_repository:
+        repo: deb https://repos.influxdata.com/ubuntu focal stable
+        state: present
+        filename: influxdata
+
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://packages.grafana.com/gpg.key
+        state: present
+
+    - name: Add Grafana repository
+      apt_repository:
+        repo: deb https://packages.grafana.com/oss/deb stable main
+        state: present
+        filename: grafana
+
+    - name: Install monitoring stack
+      apt:
+        name:
+          - influxdb
+          - telegraf
+          - grafana
+        state: present
+        update_cache: yes
+
+    - name: Start and enable InfluxDB
+      service:
+        name: influxdb
+        state: started
+        enabled: yes
+
+    - name: Start and enable Grafana
+      service:
+        name: grafana-server
+        state: started
+        enabled: yes
+
+    - name: Create InfluxDB monitoring database
+      shell: influx -execute "CREATE DATABASE monitoring"
+      args:
+        warn: false
+      changed_when: false
+
+    - name: Configure Telegraf
+      template:
+        src: templates/monitoring_config.j2
+        dest: /etc/telegraf/telegraf.conf
+      notify:
+        - restart telegraf
+        - reload systemd
+
+    - name: Provision Grafana InfluxDB datasource
+      copy:
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: InfluxDB
+              type: influxdb
+              access: proxy
+              url: http://localhost:8086
+              database: monitoring
+              isDefault: true
+              editable: false
+        dest: /etc/grafana/provisioning/datasources/influxdb.yaml
+        mode: '0644'
+      notify: restart grafana
+
+    - name: Deploy health check script
+      copy:
+        src: health_endpoint.py
+        dest: /opt/health_endpoint.py
+        mode: '0755'
+      notify: restart health_endpoint
+
+    - name: Create systemd service for health endpoint
+      template:
+        src: templates/health_endpoint.service.j2
+        dest: /etc/systemd/system/health_endpoint.service
+      notify: reload systemd
+
+    - name: Enable and start health endpoint service
+      systemd:
+        name: health_endpoint
+        enabled: yes
+        state: started
+
+    - name: Install SNMP utilities on bastion
+      apt:
+        name: snmp
+        state: present
+
+    - name: Open monitoring ports in UFW
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 3000  # Grafana
+        - 8086  # InfluxDB
+        - 8125  # Telegraf StatsD
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart telegraf
+      service:
+        name: telegraf
+        state: restarted
+        enabled: yes
+
+    - name: restart grafana
+      service:
+        name: grafana-server
+        state: restarted
+
+    - name: restart health_endpoint
+      service:
+        name: health_endpoint
+        state: restarted
 
 - name: Configure proxy nodes
-  hosts:
-    - "{{ lookup('env', 'TAG') }}_proxy1"
-    - "{{ lookup('env', 'TAG') }}_proxy2"
+  hosts: proxy
   become: true
   vars:
     vip_address: "192.168.42.100"
-    interface: "eth0"  # ****
+    interface: "{{ ansible_default_ipv4.interface }}"
   tasks:
-    - name: Install HAProxy and keepalived
+    - name: Install HAProxy and Keepalived
       apt:
         name:
           - haproxy
@@ -39,37 +168,84 @@
 
     - name: Configure HAProxy
       template:
-        src: haproxy.cfg.j2
+        src: templates/haproxy.cfg.j2
         dest: /etc/haproxy/haproxy.cfg
-      notify: Restart HAProxy
+      notify: restart haproxy
 
-    - name: Configure keepalived
+    - name: Configure Keepalived
       template:
-        src: keepalived.conf.j2
+        src: templates/keepalived.conf.j2
         dest: /etc/keepalived/keepalived.conf
-      notify: Restart keepalived
+      notify: restart keepalived
+
+    - name: Enable IP forwarding
+      sysctl:
+        name: net.ipv4.ip_nonlocal_bind
+        value: '1'
+        state: present
+
+    - name: Open proxy-related ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - 5000  # Flask Service
+        - 161   # SNMP
 
   handlers:
-    - name: Restart HAProxy
+    - name: restart haproxy
       service:
         name: haproxy
         state: restarted
 
-    - name: Restart keepalived
+    - name: restart keepalived
       service:
         name: keepalived
         state: restarted
 
 - name: Configure service nodes
-  hosts: "{{ lookup('env', 'TAG') }}_node[1:3]"
+  hosts: nodes
   become: true
   tasks:
-    - name: Install Python HTTP server
-      apt:
-        name: python3
-        state: present
+    - name: Deploy Flask service script
+      copy:
+        src: service.py
+        dest: /usr/local/bin/service.py
+        mode: 0755
 
-    - name: Start simple HTTP server
-      shell: nohup python3 -m http.server 6000 &
-      args:
-        chdir: /tmp
+    - name: Configure SNMP daemon
+      template:
+        src: templates/snmpd.conf.j2
+        dest: /etc/snmp/snmpd.conf
+      notify: restart snmpd
+
+    - name: Deploy Flask systemd service
+      template:
+        src: templates/service.service.j2
+        dest: /etc/systemd/system/service.service
+      notify:
+        - reload systemd
+        - restart flask
+        - enable flask
+
+  handlers:
+    - name: restart snmpd
+      service:
+        name: snmpd
+        state: restarted
+
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: restart flask
+      service:
+        name: service
+        state: restarted
+
+    - name: enable flask
+      service:
+        name: service
+        enabled: yes
+        state: started

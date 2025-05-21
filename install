@@ -2,8 +2,8 @@
 
 # Usage check
 if [ "$#" -ne 3 ]; then
-    echo "Usage: $0 <openrc> <tag> <ssh_key>"
-    exit 1
+  echo "Usage: $0 <openrc> <tag> <ssh_private_key>"
+  exit 1
 fi
 
 OPENRC="$1"
@@ -19,217 +19,174 @@ PROXY2_NAME="${TAG}_proxy2"
 IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"
 FLAVOR="1C-0.5GB-50GB"
 SEC_GROUP="${TAG}_secgroup"
+SSH_CONFIG="${TAG}_SSHconfig"
+INVENTORY="${TAG}_inventory.ini"
 
 source "$OPENRC"
 
 log() {
-    echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
 }
 
-log "Starting deployment of $TAG using $OPENRC"
+log "Starting deployment of $TAG"
 
-# Upload key if not present
+# Upload SSH key
 if ! openstack keypair show "$KEY_NAME" &>/dev/null; then
-    log "Adding keypair $KEY_NAME"
-    openstack keypair create --public-key "$SSH_KEY" "$KEY_NAME"
-else
-    log "Keypair $KEY_NAME already exists"
+  log "Adding keypair $KEY_NAME"
+  openstack keypair create --public-key "${SSH_KEY}.pub" "$KEY_NAME"
 fi
 
 # Network setup
-if ! openstack network show "$NETWORK" &>/dev/null; then
-    log "Creating network $NETWORK"
-    openstack network create "$NETWORK"
-fi
-
-if ! openstack subnet show "$SUBNET" &>/dev/null; then
-    log "Creating subnet $SUBNET"
-    openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 "$SUBNET"
-fi
+openstack network show "$NETWORK" &>/dev/null || openstack network create "$NETWORK"
+openstack subnet show "$SUBNET" &>/dev/null || openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 --gateway 192.168.42.1 "$SUBNET"
 
 if ! openstack router show "$ROUTER" &>/dev/null; then
-    log "Creating router $ROUTER"
-    openstack router create "$ROUTER"
-    openstack router set "$ROUTER" --external-gateway ext-net
-    openstack router add subnet "$ROUTER" "$SUBNET"
+  openstack router create "$ROUTER"
+  openstack router set "$ROUTER" --external-gateway ext-net
+  openstack router add subnet "$ROUTER" "$SUBNET"
 fi
 
 # Security group
 if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
-    log "Creating security group $SEC_GROUP"
-    openstack security group create "$SEC_GROUP"
-    for PORT in 22 5000 6000; do
-        openstack security group rule create --proto tcp --dst-port "$PORT" "$SEC_GROUP"
-    done
-    openstack security group rule create --proto udp --dst-port 6000 "$SEC_GROUP"
-    openstack security group rule create --proto icmp "$SEC_GROUP"
+  log "Creating security group $SEC_GROUP"
+  openstack security group create "$SEC_GROUP"
+  for PORT in 22 5000 6000; do
+    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
+  done
+  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
+  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
 fi
 
-# Reuse floating IPs if available
-reuse_or_create_fip() {
-    EXISTING=$(openstack floating ip list --status DOWN -f value -c "Floating IP Address" | head -n 1)
-    if [ -z "$EXISTING" ]; then
-        openstack floating ip create ext-net -f value -c "floating_ip_address"
-    else
-        echo "$EXISTING"
-    fi
+# Floating IP logic
+create_fip() {
+  openstack floating ip create ext-net -f value -c floating_ip_address
+}
+# Check if floating IP already exists
+ # FIP=$(openstack floating ip list -f value -c "Floating IP Address" | grep -E "^${TAG}_" | head -n1)
+  #if [ -z "$FIP" ]; then
+   # FIP=$(create_fip)
+    #log "Created new floating IP: $FIP"
+  #else
+   # log "Using existing floating IP: $FIP"
+  #fi
+  #echo "$FIP"
+#}
+
+# Launch VM with cloud-init user data
+launch_vm() {
+  NAME="$1"
+  log "Launching $NAME"
+
+  USERDATA_FILE=$(mktemp)
+  cat > "$USERDATA_FILE" <<EOF
+#cloud-config
+ssh_authorized_keys:
+  - $(cat ${SSH_KEY}.pub)
+EOF
+
+  openstack server create \
+    --image "$IMAGE_NAME" \
+    --flavor "$FLAVOR" \
+    --key-name "$KEY_NAME" \
+    --security-group "$SEC_GROUP" \
+    --network "$NETWORK" \
+    --user-data "$USERDATA_FILE" \
+    "$NAME"
+
+  while true; do
+    STATUS=$(openstack server show "$NAME" -f value -c status)
+    [ "$STATUS" == "ACTIVE" ] && break
+    [ "$STATUS" == "ERROR" ] && { log "ERROR: Failed to launch $NAME"; exit 1; }
+    sleep 3
+  done
+
+  rm -f "$USERDATA_FILE"
 }
 
-launch_instance() {
-    local NAME=$1
-    local FIP=$2
-    log "Launching $NAME"
-    openstack server create \
-        --image "$IMAGE_NAME" \
-        --flavor "$FLAVOR" \
-        --key-name "$KEY_NAME" \
-        --security-group "$SEC_GROUP" \
-        --network "$NETWORK" \
-        "$NAME"
+# Create and assign FIPs
+FIP_BASTION=$(create_fip)
+FIP_PROXY1=$(create_fip)
+FIP_PROXY2=$(create_fip)
 
-    # Wait for server to become ACTIVE
-    while true; do
-        STATUS=$(openstack server show "$NAME" -f value -c status)
-        if [ "$STATUS" == "ACTIVE" ]; then
-            break
-        elif [ "$STATUS" == "ERROR" ]; then
-            log "Error launching $NAME, aborting"
-            exit 1
-        fi
-        sleep 3
-    done
-
-    PORT_ID=$(openstack port list --server "$NAME" -f value -c ID | head -n1)
-    if [ -n "$PORT_ID" ]; then
-        openstack floating ip set "$FIP" --port "$PORT_ID"
-        log "Assigned floating IP $FIP to $NAME"
-    else
-        log "Failed to find port for $NAME"
-    fi
-}
-
-FIP_BASTION=$(reuse_or_create_fip)
-FIP_PROXY1=$(reuse_or_create_fip)
-FIP_PROXY2=$(reuse_or_create_fip)
-
-launch_instance "$BASTION_NAME" "$FIP_BASTION"
-launch_instance "$PROXY1_NAME" "$FIP_PROXY1"
-launch_instance "$PROXY2_NAME" "$FIP_PROXY2"
-
-# Launch 3 service nodes
-for i in {1..3}; do
-    NAME="${TAG}_node$i"
-    log "Launching service node $NAME"
-    openstack server create \
-        --image "$IMAGE_NAME" \
-        --flavor "$FLAVOR" \
-        --key-name "$KEY_NAME" \
-        --security-group "$SEC_GROUP" \
-        --network "$NETWORK" \
-        "$NAME"
-
-    # Wait for node to become ACTIVE before continuing
-    while true; do
-        STATUS=$(openstack server show "$NAME" -f value -c status)
-        if [ "$STATUS" == "ACTIVE" ]; then
-            break
-        elif [ "$STATUS" == "ERROR" ]; then
-            log "Error launching $NAME, aborting"
-            exit 1
-        fi
-        sleep 3
-    done
+# Launch bastion and proxies
+for NAME in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
+  launch_vm "$NAME"
 done
 
-# Wait for all instances to become ACTIVE
-log "Waiting for all instances to be ACTIVE"
-while true; do
-    NON_ACTIVE=$(openstack server list --name "^${TAG}_" -f value -c Status | grep -v ACTIVE || true)
-    if [ -z "$NON_ACTIVE" ]; then
-        break
-    fi
-    sleep 5
+assign_fip() {
+  NAME="$1"
+  IP="$2"
+  PORT_ID=$(openstack port list --server "$NAME" -f value -c ID | head -n1)
+  openstack floating ip set --port "$PORT_ID" "$IP"
+  log "Assigned floating IP $IP to $NAME"
+}
+
+assign_fip "$BASTION_NAME" "$FIP_BASTION"
+assign_fip "$PROXY1_NAME" "$FIP_PROXY1"
+assign_fip "$PROXY2_NAME" "$FIP_PROXY2"
+
+# Launch service nodes (no FIPs)
+for i in {1..3}; do
+  launch_vm "${TAG}_node$i"
+done
+
+# Wait for all VMs to be ACTIVE
+log "Waiting for all instances to be ACTIVE..."
+while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 5; done
+
+# Clean known_hosts entries for all instances ***************** remove this if not needed
+for ip in $(openstack server list --name "^${TAG}_" -f value -c Networks | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'); do
+    ssh-keygen -f "/home/fiona/.ssh/known_hosts" -R "$ip" #change this to your user
+    ssh-keyscan -H "$ip" >> "/home/fiona/.ssh/known_hosts"
 done
 
 # Generate SSH config
-log "Generating SSH config to ${TAG}_SSHconfig"
-rm -f "${TAG}_SSHconfig"
+log "Generating SSH config to $SSH_CONFIG"
+rm -f "$SSH_CONFIG"
 for SERVER in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
-    PORT_ID=$(openstack port list --server "$SERVER" -f value -c ID | head -n1)
-    IP=$(openstack floating ip list --port "$PORT_ID" -f value -c "Floating IP Address")
-    echo "Host $SERVER" >> "${TAG}_SSHconfig"
-    echo "    HostName $IP" >> "${TAG}_SSHconfig"
-    echo "    User ubuntu" >> "${TAG}_SSHconfig"
-    echo "    IdentityFile $SSH_KEY" >> "${TAG}_SSHconfig"
-    echo "" >> "${TAG}_SSHconfig"
+  PORT_ID=$(openstack port list --server "$SERVER" -f value -c ID | head -n1)
+  IP=$(openstack floating ip list --port "$PORT_ID" -f value -c "Floating IP Address")
+  echo -e "Host $SERVER\n  HostName $IP\n  User ubuntu\n  IdentityFile $SSH_KEY\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n" >> "$SSH_CONFIG"
 done
 
-log "Generating Ansible inventory to ${TAG}_inventory.ini"
+for i in {1..3}; do
+  NODE="${TAG}_node$i"
+  IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+  echo -e "Host $NODE\n  HostName $IP\n  User ubuntu\n  IdentityFile $SSH_KEY\n  ProxyJump ubuntu@$FIP_BASTION\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n" >> "$SSH_CONFIG"
+done
 
-# Create inventory file and write groups with hosts
-
-cat > "${TAG}_inventory.ini" <<EOF
+# Generate Ansible inventory
+log "Generating Ansible inventory to $INVENTORY"
+cat > "$INVENTORY" <<EOF
 [bastion]
+$BASTION_NAME ansible_host=$FIP_BASTION ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
+
+[proxy]
+$PROXY1_NAME ansible_host=$FIP_PROXY1 ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
+$PROXY2_NAME ansible_host=$FIP_PROXY2 ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
+
+[nodes]
 EOF
 
-# Function to get Floating IP from server name
-get_fip_from_server() {
-    local SERVER_NAME="$1"
-    local FIXED_IP=$(openstack server show -f value -c addresses "$SERVER_NAME" | cut -d '=' -f2)
-    if [ -z "$FIXED_IP" ]; then
-        echo "ERROR: Could not get fixed IP for $SERVER_NAME" >&2
-        return 1
-    fi
-    local PORT_ID=$(openstack port list --fixed-ip ip-address="$FIXED_IP" -f value -c ID)
-    if [ -z "$PORT_ID" ]; then
-        echo "ERROR: No port found for $FIXED_IP ($SERVER_NAME)" >&2
-        return 1
-    fi
-    openstack floating ip list --port "$PORT_ID" -f value -c "Floating IP Address"
-}
-
-# Bastion
-FIP=$(get_fip_from_server "$BASTION_NAME")
-if [ -n "$FIP" ]; then
-    echo "${BASTION_NAME} ansible_host=${FIP} ansible_user=ubuntu ansible_ssh_private_key_file=${SSH_KEY}" >> "${TAG}_inventory.ini"
-else
-    echo "ERROR: No floating IP for $BASTION_NAME" >&2
-fi
-
-# Proxy group
-echo -e "\n[proxy]" >> "${TAG}_inventory.ini"
-for PROXY in "$PROXY1_NAME" "$PROXY2_NAME"; do
-    FIP=$(get_fip_from_server "$PROXY")
-    if [ -n "$FIP" ]; then
-        echo "${PROXY} ansible_host=${FIP} ansible_user=ubuntu ansible_ssh_private_key_file=${SSH_KEY}" >> "${TAG}_inventory.ini"
-    else
-        echo "ERROR: No floating IP for $PROXY" >&2
-    fi
-done
-
-# Nodes group
-echo -e "\n[nodes]" >> "${TAG}_inventory.ini"
 for i in {1..3}; do
-    NODE_NAME="${TAG}_node$i"
-    FIXED_IP=$(openstack server show -f value -c addresses "$NODE_NAME" | cut -d '=' -f2)
-    if [ -z "$FIXED_IP" ]; then
-        echo "ERROR: Could not get fixed IP for $NODE_NAME" >&2
-        continue
-    fi
-    PORT_ID=$(openstack port list --fixed-ip ip-address="$FIXED_IP" -f value -c ID)
-    FIP=$(openstack floating ip list --port "$PORT_ID" -f value -c "Floating IP Address")
-    echo "${NODE_NAME} ansible_host=${FIP:-$FIXED_IP} ansible_user=ubuntu ansible_ssh_private_key_file=${SSH_KEY}" >> "${TAG}_inventory.ini"
+  NODE="${TAG}_node$i"
+  IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+  echo "$NODE ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$FIP_BASTION'" >> "$INVENTORY"
+done
+echo "Listing IPs of all servers with tag prefix: $TAG"
+
+# Get all servers with names starting with $TAG
+SERVERS=$(openstack server list --name "^${TAG}_" -f value -c Name)
+
+for SERVER in $SERVERS; do
+  # Extract the IP address (assumes IPv4)
+  IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+  echo "$SERVER: $IP"
 done
 
 
-
-if ! command -v ansible-playbook &>/dev/null; then
-    log "ansible-playbook command not found. Please install Ansible to continue."
-    exit 1
-fi
-
-log "Running Ansible playbook to configure nodes"
-#ansible-playbook -i "${TAG}_SSHconfig" install-playbook.yaml
-ansible-playbook -i "${TAG}_inventory.ini" install-playbook.yaml
+# Run Ansible playbook
+log "Running Ansible playbook"
+ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml
 
 log "Deployment complete."

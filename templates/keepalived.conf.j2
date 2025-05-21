@@ -1,14 +1,27 @@
+vrrp_script chk_haproxy {
+    script "killall -0 haproxy"
+    interval 2
+    weight 2
+    fall 2
+    rise 2
+}
+
 vrrp_instance VI_1 {
-    state {{ inventory_hostname.endswith('proxy1') | ternary('MASTER', 'BACKUP') }}
+    state {{ (inventory_hostname == groups['proxy'][0]) | ternary('MASTER', 'BACKUP') }}
     interface {{ interface }}
     virtual_router_id 51
-    priority {{ inventory_hostname.endswith('proxy1') | ternary('101', '100') }}
+    priority {{ (inventory_hostname == groups['proxy'][0]) | ternary('101', '100') }}
     advert_int 1
     authentication {
         auth_type PASS
-        auth_pass secret
+        auth_pass {{ keepalived_password | default('secret') }}
     }
     virtual_ipaddress {
-        {{ vip_address }}
+        {{ vip_address }}/24
     }
+    track_script {
+        chk_haproxy
+    }
+    notify_master "/etc/keepalived/master.sh"
+    notify_backup "/etc/keepalived/backup.sh"
 }
