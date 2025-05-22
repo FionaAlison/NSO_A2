@@ -16,6 +16,7 @@ ROUTER="${TAG}_router"
 BASTION_NAME="${TAG}_bastion"
 PROXY1_NAME="${TAG}_proxy1"
 PROXY2_NAME="${TAG}_proxy2"
+VIP_PORT="${TAG}_vip"  # New virtual port for HAProxy
 IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"
 FLAVOR="1C-0.5GB-50GB"
 SEC_GROUP="${TAG}_secgroup"
@@ -50,27 +51,37 @@ fi
 if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
   log "Creating security group $SEC_GROUP"
   openstack security group create "$SEC_GROUP"
-  for PORT in 22 5000 6000; do
+  for PORT in 22 80 443 5000 6000 9103; do  # Added ports 80 and 443 for web traffic
     openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
   done
   openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
   openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP"
 fi
 
-# Floating IP logic
+# Floating IP management
 create_fip() {
   openstack floating ip create ext-net -f value -c floating_ip_address
 }
-# Check if floating IP already exists
- # FIP=$(openstack floating ip list -f value -c "Floating IP Address" | grep -E "^${TAG}_" | head -n1)
-  #if [ -z "$FIP" ]; then
-   # FIP=$(create_fip)
-    #log "Created new floating IP: $FIP"
-  #else
-   # log "Using existing floating IP: $FIP"
-  #fi
-  #echo "$FIP"
-#}
+
+# Create floating IPs (one for bastion, one for HAProxy VIP)
+FIP_BASTION=$(create_fip)
+FIP_HAPROXY=$(create_fip)
+log "Created floating IP $FIP_BASTION for bastion"
+log "Created floating IP $FIP_HAPROXY for HAProxy VIP"
+
+# Create virtual port for HAProxy VIP
+if ! openstack port show "$VIP_PORT" &>/dev/null; then
+  log "Creating virtual port $VIP_PORT for HAProxy VIP"
+  openstack port create --network "$NETWORK" --fixed-ip subnet="$SUBNET" --no-security-group "$VIP_PORT"
+  
+  # Assign floating IP to the virtual port
+  openstack floating ip set --port "$VIP_PORT" "$FIP_HAPROXY"
+  log "Assigned floating IP $FIP_HAPROXY to virtual port $VIP_PORT"
+  
+  # Get the fixed IP of the virtual port
+  VIP_FIXED_IP=$(openstack port show "$VIP_PORT" -f value -c fixed_ips | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  log "Virtual port $VIP_PORT has fixed IP $VIP_FIXED_IP"
+fi
 
 # Launch VM with cloud-init user data
 launch_vm() {
@@ -103,12 +114,7 @@ EOF
   rm -f "$USERDATA_FILE"
 }
 
-# Create and assign FIPs
-FIP_BASTION=$(create_fip)
-FIP_PROXY1=$(create_fip)
-FIP_PROXY2=$(create_fip)
-
-# Launch bastion and proxies
+# Launch VMs
 for NAME in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
   launch_vm "$NAME"
 done
@@ -122,8 +128,17 @@ assign_fip() {
 }
 
 assign_fip "$BASTION_NAME" "$FIP_BASTION"
-assign_fip "$PROXY1_NAME" "$FIP_PROXY1"
-assign_fip "$PROXY2_NAME" "$FIP_PROXY2"
+
+# Configure HAProxy ports to allow traffic from VIP
+configure_proxy_ports() {
+  for PROXY in "$PROXY1_NAME" "$PROXY2_NAME"; do
+    PROXY_IP=$(openstack server show "$PROXY" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+    PORT_ID=$(openstack port list --fixed-ip ip-address="$PROXY_IP" -f value -c ID)
+    openstack port set --allowed-address ip-address="$VIP_FIXED_IP" "$PORT_ID"
+    log "Configured port $PORT_ID ($PROXY) to allow traffic from VIP $VIP_FIXED_IP"
+  done
+}
+configure_proxy_ports
 
 # Launch service nodes (no FIPs)
 for i in {1..3}; do
@@ -132,21 +147,26 @@ done
 
 # Wait for all VMs to be ACTIVE
 log "Waiting for all instances to be ACTIVE..."
-while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 5; done
+while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 10; done
 
-# Clean known_hosts entries for all instances ***************** remove this if not needed
-for ip in $(openstack server list --name "^${TAG}_" -f value -c Networks | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'); do
-    ssh-keygen -f "/home/fiona/.ssh/known_hosts" -R "$ip" #change this to your user
-    ssh-keyscan -H "$ip" >> "/home/fiona/.ssh/known_hosts"
-done
-
+refresh_known_hosts() {
+  for ip in $(openstack server list --name "^${TAG}_" -f value -c Networks | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'); do
+      ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip"
+      ssh-keyscan -H "$ip" >> "$HOME/.ssh/known_hosts"
+  done
+}
+refresh_known_hosts
 # Generate SSH config
 log "Generating SSH config to $SSH_CONFIG"
 rm -f "$SSH_CONFIG"
-for SERVER in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
-  PORT_ID=$(openstack port list --server "$SERVER" -f value -c ID | head -n1)
-  IP=$(openstack floating ip list --port "$PORT_ID" -f value -c "Floating IP Address")
-  echo -e "Host $SERVER\n  HostName $IP\n  User ubuntu\n  IdentityFile $SSH_KEY\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n" >> "$SSH_CONFIG"
+
+# Bastion
+echo -e "Host $BASTION_NAME\n  HostName $FIP_BASTION\n  User ubuntu\n  IdentityFile $SSH_KEY\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n" >> "$SSH_CONFIG"
+
+# Proxies and Nodes via Bastion
+for SERVER in "$PROXY1_NAME" "$PROXY2_NAME"; do
+  IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+  echo -e "Host $SERVER\n  HostName $IP\n  User ubuntu\n  IdentityFile $SSH_KEY\n  ProxyJump ubuntu@$FIP_BASTION\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n" >> "$SSH_CONFIG"
 done
 
 for i in {1..3}; do
@@ -157,36 +177,41 @@ done
 
 # Generate Ansible inventory
 log "Generating Ansible inventory to $INVENTORY"
+
 cat > "$INVENTORY" <<EOF
 [bastion]
-$BASTION_NAME ansible_host=$FIP_BASTION ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
-
-[proxy]
-$PROXY1_NAME ansible_host=$FIP_PROXY1 ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
-$PROXY2_NAME ansible_host=$FIP_PROXY2 ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY
-
-[nodes]
+$BASTION_NAME ansible_host=$FIP_BASTION ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
 EOF
 
+echo -e "\n[proxy]" >> "$INVENTORY"
+for SERVER in "$PROXY1_NAME" "$PROXY2_NAME"; do
+  IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+  echo "$SERVER ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$FIP_BASTION -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'" >> "$INVENTORY"
+done
+
+echo -e "\n[nodes]" >> "$INVENTORY"
 for i in {1..3}; do
   NODE="${TAG}_node$i"
   IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-  echo "$NODE ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$FIP_BASTION'" >> "$INVENTORY"
+  echo "$NODE ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$FIP_BASTION -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'" >> "$INVENTORY"
 done
-echo "Listing IPs of all servers with tag prefix: $TAG"
 
-# Get all servers with names starting with $TAG
+# Add VIP information to inventory
+echo -e "\n[all:vars]" >> "$INVENTORY"
+echo "haproxy_vip=$FIP_HAPROXY" >> "$INVENTORY"
+echo "haproxy_vip_fixed=$VIP_FIXED_IP" >> "$INVENTORY"
+
+# Print IP summary
+log "Listing IPs of all servers with tag prefix: $TAG"
 SERVERS=$(openstack server list --name "^${TAG}_" -f value -c Name)
-
 for SERVER in $SERVERS; do
-  # Extract the IP address (assumes IPv4)
   IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
   echo "$SERVER: $IP"
 done
-
+echo "HAProxy VIP: $FIP_HAPROXY (maps to $VIP_FIXED_IP)"
 
 # Run Ansible playbook
 log "Running Ansible playbook"
 ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml
 
-log "Deployment complete."
+log "Deployment complete. HAProxy can be accessed via $FIP_HAPROXY"

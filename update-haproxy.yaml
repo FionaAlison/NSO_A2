@@ -1,0 +1,24 @@
+- name: Gather facts on proxy nodes
+  hosts: nodes
+  gather_facts: yes
+  
+- name: Update HAProxy configuration and reload service
+  hosts: proxy
+  gather_facts: yes
+  become: yes
+  tasks:
+    - name: Template the haproxy config
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - reload haproxy
+
+  handlers:
+    - name: reload haproxy
+      service:
+        name: haproxy
+        state: reloaded

@@ -1,5 +1,5 @@
 vrrp_script chk_haproxy {
-    script "killall -0 haproxy"
+    script "/usr/bin/killall -0 haproxy"
     interval 2
     weight 2
     fall 2
@@ -7,21 +7,32 @@ vrrp_script chk_haproxy {
 }
 
 vrrp_instance VI_1 {
-    state {{ (inventory_hostname == groups['proxy'][0]) | ternary('MASTER', 'BACKUP') }}
+    state {{ 'MASTER' if inventory_hostname == groups['proxy'][0] else 'BACKUP' }}
     interface {{ interface }}
     virtual_router_id 51
-    priority {{ (inventory_hostname == groups['proxy'][0]) | ternary('101', '100') }}
+    priority {{ '101' if inventory_hostname == groups['proxy'][0] else '100' }}
     advert_int 1
+
     authentication {
         auth_type PASS
         auth_pass {{ keepalived_password | default('secret') }}
     }
+
+    unicast_src_ip {{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}
+    unicast_peer {
+        {% for host in groups['proxy'] if host != inventory_hostname %}
+        {{ hostvars[host]['ansible_default_ipv4']['address'] }}
+        {% endfor %}
+    }
+
     virtual_ipaddress {
         {{ vip_address }}/24
     }
+
     track_script {
         chk_haproxy
     }
+
     notify_master "/etc/keepalived/master.sh"
     notify_backup "/etc/keepalived/backup.sh"
 }

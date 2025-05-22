@@ -1,4 +1,6 @@
 #!/bin/bash
+exec 2>/dev/null
+
 set -euo pipefail
 
 if [[ $# -ne 3 ]]; then
@@ -33,6 +35,25 @@ get_bastion_ip() {
     jq -r '.addresses' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | grep -vE '^(10|192\.168|172\.(1[6-9]|2[0-9]|3[0-1]))' | head -n 1
 }
 
+get_node_ip_name_map() {
+  local node_prefix="${TAG}_node"
+
+  awk -v prefix="$node_prefix" '
+    /^\[nodes\]/ {flag=1; next}
+    /^\[/ {flag=0}
+    flag && $1 ~ "^"prefix {
+      host = $1
+      ip = ""
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^ansible_host=/) {
+          split($i, a, "=")
+          ip = a[2]
+        }
+      }
+      if (ip != "") print ip, host
+    }' "$INVENTORY_FILE"
+}
+
 get_healthy_nodes() {
   local bastion_ip="$1"
   local tmpfile="/tmp/nodes.list"
@@ -53,11 +74,98 @@ get_healthy_nodes() {
 
   [[ -z "$node_ips" ]] && return
 
-  printf "%s\n" $node_ips | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
+  printf "%s\n" $node_ips | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
     "bash -c 'cat > \"$tmpfile\"'"
 
-  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
-    "curl -s http://localhost:5000/health" 2>/dev/null | jq -r '.healthy_nodes[]' || true
+  ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
+    "curl -s http://localhost:15000/health" 2>/dev/null | jq -r '.healthy_nodes[]' || true
+}
+
+print_unhealthy_nodes() {
+  local bastion_ip="$1"
+
+  local map
+  map=$(get_node_ip_name_map)
+
+  local healthy_ips
+  healthy_ips=$(get_healthy_nodes "$bastion_ip")
+
+  declare -A ip_to_name=()
+  declare -A healthy_lookup=()
+
+  # Build IP to hostname map
+  while read -r ip name; do
+    ip_to_name["$ip"]="$name"
+  done <<< "$map"
+
+  # Build set of healthy IPs
+  while read -r ip; do
+    healthy_lookup["$ip"]=1
+  done <<< "$healthy_ips"
+
+  local unhealthy_nodes=()
+
+  for ip in "${!ip_to_name[@]}"; do
+    if [[ -z "${healthy_lookup[$ip]:-}" ]]; then
+      unhealthy_nodes+=("${ip_to_name[$ip]} ($ip)")
+    fi
+  done
+
+  if (( ${#unhealthy_nodes[@]} > 0 )); then
+    echo "Unhealthy nodes:"
+    for node in "${unhealthy_nodes[@]}"; do
+      echo "- $node"
+    done
+    return 0  # found unhealthy nodes
+  fi
+
+  return 1  # no unhealthy nodes found
+}
+
+
+get_proxy_status() {
+  local bastion_ip="$1"
+  local proxy_prefix="${TAG}_proxy"
+
+  local hosts=()
+  local ips=()
+
+  # Read host and IP into arrays
+  while read -r host ip; do
+    hosts+=("$host")
+    ips+=("$ip")
+  done < <(awk -v prefix="$proxy_prefix" '
+    /^\[proxy\]/ {flag=1; next}
+    /^\[/ {flag=0}
+    flag && $1 ~ "^"prefix {
+      host = $1
+      ip = ""
+      for (i = 2; i <= NF; i++) {
+        if ($i ~ /^ansible_host=/) {
+          split($i, a, "=")
+          ip = a[2]
+        }
+      }
+      if (ip != "") print host, ip
+    }' "$INVENTORY_FILE")
+
+  [[ ${#hosts[@]} -eq 0 ]] && return
+
+  # Loop over indices
+  for i in "${!hosts[@]}"; do
+    local host="${hosts[i]}"
+    local ip="${ips[i]}"
+
+    status=$(ssh -i "$SSH_KEY" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 \
+      -J "ubuntu@${bastion_ip}" \
+      "ubuntu@${ip}" \
+      "sudo cat /var/run/keepalived.state 2>/dev/null" || echo "UNREACHABLE")
+
+    echo "$host: ${status^^}"
+  done
 }
 
 scale_up() {
@@ -91,25 +199,63 @@ EOF
       --user-data "$USERDATA_FILE" \
       --property "tag=${TAG}" \
       "$NODE_NAME" &
-
+    
     new_nodes+=("$NODE_NAME")
   done
 
   wait
-  sleep 20
+
+ log "Waiting for new instances to be ACTIVE..."
+for NODE_NAME in "${new_nodes[@]}"; do
+  while true; do
+    STATUS=$(openstack server show "$NODE_NAME" -f value -c status)
+    if [[ "$STATUS" == "ACTIVE" ]]; then
+      break
+    elif [[ "$STATUS" == "ERROR" ]]; then
+      log "ERROR: Instance $NODE_NAME failed to launch."
+      return 1
+    fi
+    sleep 5
+  done
+done
+
+
+  log "All instances are ACTIVE, updating inventory and running playbooks..."
 
   BASTION_IP=$(get_bastion_ip)
 
   echo -e "\n[nodes]" >> "$TEMP_NEW_NODES_INVENTORY"
 
-  for NODE_NAME in "${new_nodes[@]}"; do
+    for NODE_NAME in "${new_nodes[@]}"; do
+
     IP=$(openstack server show "$NODE_NAME" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-    echo "$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$BASTION_IP'" >> "$TEMP_NEW_NODES_INVENTORY"
-    echo "$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o ProxyJump=ubuntu@$BASTION_IP'" >> "$INVENTORY_FILE"
+    NODE_ENTRY="$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump=ubuntu@$BASTION_IP'"
+
+    echo "$NODE_ENTRY" >> "$TEMP_NEW_NODES_INVENTORY"
+
+    # Insert node into [nodes] section of the inventory file
+    awk -v entry="$NODE_ENTRY" '
+      BEGIN { inserted=0 }
+      /^\[nodes\]/ {
+        print; inserted=1; next
+      }
+      inserted && /^\[/ {
+        print entry; inserted=0
+      }
+      { print }
+      END {
+        if (inserted) print entry
+      }
+    ' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
   done
 
+
   ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml
+  unset new_nodes
+  rm -f "$TEMP_NEW_NODES_INVENTORY"
 }
+  
 
 scale_down() {
   local count="$1"
@@ -118,15 +264,47 @@ scale_down() {
   log "Removing $count node(s)."
 
   mapfile -t old_nodes < <(openstack server list -f json | \
-    jq -r --arg tag "$TAG" '.[] | select(.Properties.tag == $tag and (.Name | test("node"))) | .Name' | sort | head -n "$count")
+    jq -r --arg tag "$TAG" '.[] | select(.Name | startswith($tag + "_node")) | .Name' | sort | head -n "$count")
 
   for node in "${old_nodes[@]}"; do
     log "Deleting $node"
     openstack server delete "$node" &
-    sed -i "/^$node\s/d" "$INVENTORY_FILE"
+    if grep -q "^$node\s" "$INVENTORY_FILE"; then
+      sed -i "/^$node\s/d" "$INVENTORY_FILE"
+      log "Removed $node from inventory."
+      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml
+    else
+      log "Did not find $node in inventory to remove."
+    fi
   done
 
   wait
+}
+cleanup_unhealthy_nodes() {
+  local bastion_ip="$1"
+  local unhealthy_nodes
+  unhealthy_nodes=$(print_unhealthy_nodes "$bastion_ip")
+
+  if [[ -z "$unhealthy_nodes" ]]; then
+    log "No unhealthy nodes to clean up."
+    return
+  fi
+
+  log "Cleaning up unhealthy nodes..."
+  while IFS= read -r line; do
+    # Skip empty lines or non-node lines
+    [[ "$line" =~ ^- ]] || continue
+
+    # Extract node name (before first space or parenthesis)
+    node=$(echo "$line" | awk '{print $2}')
+    [[ -z "$node" ]] && continue
+
+    log "Deleting instance: $node"
+    openstack server delete "$node"
+
+    log "Removing $node from inventory: $INVENTORY_FILE"
+    awk -v node="$node" '$1 != node' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+  done <<< "$unhealthy_nodes"
 }
 
 # Main loop
@@ -139,12 +317,21 @@ while true; do
   BASTION_IP=$(get_bastion_ip)
   [[ -z "$BASTION_IP" ]] && log "Could not get Bastion IP. Retrying in 30s..." && sleep 30 && continue
 
-  mapfile -t CURRENT_NODES < <(get_healthy_nodes "$BASTION_IP" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  # Get current healthy nodes IP list
+  mapfile -t CURRENT_NODES < <(get_healthy_nodes "$BASTION_IP")
   CURRENT_COUNT=${#CURRENT_NODES[@]}
   log "Current healthy nodes: $CURRENT_COUNT"
 
   if (( CURRENT_COUNT < DESIRED )); then
     MISSING_COUNT=$((DESIRED - CURRENT_COUNT))
+
+    if print_unhealthy_nodes "$BASTION_IP"; then
+      log "Found unhealthy nodes above, scaling up by $MISSING_COUNT to meet desired count."
+      cleanup_unhealthy_nodes "$BASTION_IP"
+    else
+      log "No unhealthy nodes detected, but scaling up by $MISSING_COUNT to meet desired count."
+    fi
+
     scale_up "$MISSING_COUNT"
   elif (( CURRENT_COUNT > DESIRED )); then
     EXTRA_COUNT=$((CURRENT_COUNT - DESIRED))
@@ -152,6 +339,9 @@ while true; do
   else
     log "Cluster size is optimal. Sleeping."
   fi
+
+  log "Checking proxy status..."
+  get_proxy_status "$BASTION_IP"
 
   sleep 30
 done

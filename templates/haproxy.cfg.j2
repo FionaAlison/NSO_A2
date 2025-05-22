@@ -19,7 +19,7 @@ frontend http-in
 
 backend service-backend
     balance roundrobin
-    option httpchk GET /health
+    option httpchk GET /
     {% for node in groups['nodes'] %}
     server {{ node }} {{ hostvars[node]['ansible_default_ipv4']['address'] }}:5000 check
     {% endfor %}

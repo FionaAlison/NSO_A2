@@ -1,6 +1,7 @@
 ---
 - name: Configure all nodes - Common Setup
   hosts: all
+  gather_facts: yes
   become: yes
   tasks:
     - name: Wait for apt lock
@@ -18,6 +19,12 @@
           - net-tools
         state: present
         update_cache: yes
+
+    - name: Allow monitoring port 9103
+      ufw:
+        rule: allow
+        port: '9103'
+        proto: tcp
 
 - name: Configure bastion host - Monitoring stack
   hosts: bastion
@@ -126,9 +133,19 @@
         port: "{{ item }}"
         proto: tcp
       loop:
-        - 3000  # Grafana
-        - 8086  # InfluxDB
-        - 8125  # Telegraf StatsD
+        - '3000'  # Grafana
+        - '8086'  # InfluxDB
+        - '8125'  # Telegraf StatsD
+
+    - name: Upload iptables configuration script
+      copy:
+        src: configure-iptables.sh
+        dest: /tmp/configure_iptables.sh
+        mode: '0755'
+
+    - name: Run iptables configuration script
+      shell: /tmp/configure_iptables.sh
+      become: yes
 
   handlers:
     - name: reload systemd
@@ -153,10 +170,15 @@
 
 - name: Configure proxy nodes
   hosts: proxy
-  become: true
+  become: yes
   vars:
-    vip_address: "192.168.42.100"
+    vip_address: "{{ haproxy_vip_fixed }}"
     interface: "{{ ansible_default_ipv4.interface }}"
+    keepalived_priority: "{{ 100 if inventory_hostname == groups['proxy'][0] else 90 }}"
+    keepalived_state: "{{ 'MASTER' if inventory_hostname == groups['proxy'][0] else 'BACKUP' }}"
+    keepalived_password: "mysecretpassword"
+    keepalived_peers: "{{ groups['proxy'] | difference([inventory_hostname]) | map('extract', hostvars, ['ansible_host']) | list }}"
+
   tasks:
     - name: Install HAProxy and Keepalived
       apt:
@@ -166,23 +188,59 @@
         state: present
         update_cache: yes
 
-    - name: Configure HAProxy
+    - name: Configure HAProxy with VIP support
       template:
         src: templates/haproxy.cfg.j2
         dest: /etc/haproxy/haproxy.cfg
       notify: restart haproxy
 
-    - name: Configure Keepalived
+    - name: Configure Keepalived with enhanced settings
       template:
         src: templates/keepalived.conf.j2
         dest: /etc/keepalived/keepalived.conf
       notify: restart keepalived
 
-    - name: Enable IP forwarding
+    - name: Enable IP forwarding and non-local binding
       sysctl:
-        name: net.ipv4.ip_nonlocal_bind
-        value: '1'
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
         state: present
+      loop:
+        - { name: net.ipv4.ip_nonlocal_bind, value: '1' }
+        - { name: net.ipv4.ip_forward, value: '1' }
+
+    - name: Create master notification script
+      copy:
+        content: |
+          #!/bin/bash
+          echo MASTER > /var/run/keepalived.state
+          logger "Keepalived: Entering MASTER state"
+          ip addr add {{ vip_address }}/24 dev {{ interface }}
+          arping -c 3 -A -I {{ interface }} {{ vip_address }}
+          systemctl restart haproxy
+        dest: /etc/keepalived/master.sh
+        mode: '0755'
+
+    - name: Create backup notification script
+      copy:
+        content: |
+          #!/bin/bash
+          echo BACKUP > /var/run/keepalived.state
+          logger "Keepalived: Entering BACKUP state"
+          ip addr del {{ vip_address }}/24 dev {{ interface }} || true
+        dest: /etc/keepalived/backup.sh
+        mode: '0755'
+
+    - name: Create check_haproxy script
+      copy:
+        content: |
+          #!/bin/bash
+          if ! pgrep haproxy >/dev/null; then
+            exit 1
+          fi
+          exit 0
+        dest: /etc/keepalived/check_haproxy.sh
+        mode: '0755'
 
     - name: Open proxy-related ports
       ufw:
@@ -190,8 +248,27 @@
         port: "{{ item }}"
         proto: tcp
       loop:
-        - 5000  # Flask Service
-        - 161   # SNMP
+        - 5000
+        - 161
+        - 80
+        - 443
+    - name: Allow VRRP traffic on UDP 112
+      ufw:
+        rule: allow
+        proto: udp
+        port: 112
+        from_ip: "{{ item }}"
+      loop: "{{ groups['proxy'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | list }}"
+      when: inventory_hostname != item
+
+    - name: Ensure Keepalived and HAProxy are enabled
+      service:
+        name: "{{ item }}"
+        enabled: yes
+        state: started
+      loop:
+        - keepalived
+        - haproxy
 
   handlers:
     - name: restart haproxy
@@ -206,13 +283,13 @@
 
 - name: Configure service nodes
   hosts: nodes
-  become: true
+  become: yes
   tasks:
     - name: Deploy Flask service script
       copy:
         src: service.py
         dest: /usr/local/bin/service.py
-        mode: 0755
+        mode: '0755'
 
     - name: Configure SNMP daemon
       template:
