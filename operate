@@ -205,20 +205,20 @@ EOF
 
   wait
 
- log "Waiting for new instances to be ACTIVE..."
-for NODE_NAME in "${new_nodes[@]}"; do
-  while true; do
-    STATUS=$(openstack server show "$NODE_NAME" -f value -c status)
-    if [[ "$STATUS" == "ACTIVE" ]]; then
-      break
-    elif [[ "$STATUS" == "ERROR" ]]; then
-      log "ERROR: Instance $NODE_NAME failed to launch."
-      return 1
-    fi
-    sleep 5
+  log "Waiting for new instances to be ACTIVE..."
+  for NODE_NAME in "${new_nodes[@]}"; do
+    while true; do
+      STATUS=$(openstack server show "$NODE_NAME" -f value -c status)
+      if [[ "$STATUS" == "ACTIVE" ]]; then
+        break
+      elif [[ "$STATUS" == "ERROR" ]]; then
+        log "ERROR: Instance $NODE_NAME failed to launch."
+        return 1
+      fi
+      sleep 5
+    done
   done
-done
-
+  sleep 20
 
   log "All instances are ACTIVE, updating inventory and running playbooks..."
 

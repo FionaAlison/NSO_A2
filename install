@@ -55,17 +55,17 @@ if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
   log "Creating security group $SEC_GROUP"
   openstack security group create "$SEC_GROUP" &>/dev/null
   for PORT in 22 80 443 5000 6000 9103 3000 8086; do  # Added ports 80 and 443 for web traffic
-    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" 
+    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
   done
-  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" 
-  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" 
-  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" 
+  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
 fi
 
 log "Checking existing floating IPs on ext-net"
 
 # List floating IPs on ext-net (filter by network name ext-net if needed)
-floating_ip_present=$(openstack floating ip list --network ext-net -c 'Floating IP Address' -f value)
+floating_ip_present=$(openstack floating ip list --network ext-net --status DOWN -c 'Floating IP Address' -f value)
 
 # Save them temporarily
 echo "$floating_ip_present" > /tmp/floating_ips_list
@@ -175,12 +175,12 @@ done
 
 # Wait for all VMs to be ACTIVE
 log "Waiting for all instances to be ACTIVE..."
-while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 20; done
+while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 40; done
 
 refresh_known_hosts() {
   for ip in $(openstack server list --name "^${TAG}_" -f value -c Networks | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'); do
-      ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip"
-      ssh-keyscan -H "$ip" >> "$HOME/.ssh/known_hosts"
+      ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" > /dev/null 2>&1
+      ssh-keyscan -H "$ip" >> "$HOME/.ssh/known_hosts" 2> /dev/null
   done
 }
 refresh_known_hosts
@@ -229,17 +229,19 @@ echo -e "\n[all:vars]" >> "$INVENTORY"
 echo "haproxy_vip=$FIP_HAPROXY" >> "$INVENTORY"
 echo "haproxy_vip_fixed=$VIP_FIXED_IP" >> "$INVENTORY"
 # Run Ansible playbook
+
+sleep 20
 log "Running Ansible playbook"
-ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i -q "$INVENTORY" install-playbook.yaml
+ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml > /dev/null 2>&1
 
 log "Deployment complete. HAProxy can be accessed via $FIP_HAPROXY"
 
 # Count nodes (adjust pattern to your inventory format)
-REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY_FILE" | wc -l)
+REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY" | wc -l)
 
 PORT=5000
 SLEEP_SEC=1
-
+sleep 10
 for i in $(seq 1 $REQUESTS); do
   timestamp=$(date "+%Y-%m-%d %H:%M:%S")
   response=$(curl -s http:/$FIP_HAPROXY:$PORT/)
