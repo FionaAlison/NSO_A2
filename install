@@ -230,9 +230,9 @@ echo "haproxy_vip=$FIP_HAPROXY" >> "$INVENTORY"
 echo "haproxy_vip_fixed=$VIP_FIXED_IP" >> "$INVENTORY"
 # Run Ansible playbook
 
-sleep 20
+sleep 60
 log "Running Ansible playbook"
-ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml > /dev/null 2>&1
+ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml 
 
 log "Deployment complete. HAProxy can be accessed via $FIP_HAPROXY"
 

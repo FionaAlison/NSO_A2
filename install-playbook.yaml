@@ -127,7 +127,6 @@
     - name: Create InfluxDB monitoring database
       shell: influx -execute "CREATE DATABASE monitoring"
       args:
-        warn: false
       changed_when: false
 
     - name: Configure Telegraf

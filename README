@@ -1,18 +1,91 @@
-#Simple flask services/applications for various assignments.
-# 
-# main.py: Online calculator, supports only 'add'.
-# application2.py: Replies with a string containing the Time and hostname.
-# assignment2.py: Replies with an HTML formatted string containing the Time and hostname.
+OpenStack Service Deployment and Operation Automation
+Overview
 
-#export FLASK_APP=<filename>
-#export FLASK_RUN_HOST=<localhost|0.0.0.0>
-#export FLASK_RUN_PORT=8210
+This project implements a full-stack deployment, monitoring, and teardown solution for managing a scalable cloud service infrastructure within an OpenStack environment. It is executed as a group project, incorporating skills learned from previous assignments such as network design, service deployment, and monitoring, with added focus on OpenStack and automation.
 
+The system supports three distinct operational modes:
 
+    Install – Deploys the infrastructure and services
 
-Usage Example:
-export FLASK_APP=main.py
-export FLASK_RUN_HOST=localhost
-export FLASK_RUN_PORT=8210
-flask run
+    Operate – Monitors and adjusts the number of service nodes
+
+    Cleanup – Deallocates and removes all deployed resources
+
+The project is based on the starter repository: NSO_A2, and has been extended significantly to meet the outlined requirements.
+Project Structure
+
+This repository includes:
+
+    install – Automates initial deployment of resources and configuration of service, proxy, and bastion nodes.
+
+    operate – Monitors node health and count, and scales nodes up/down accordingly.
+
+    cleanup – Fully removes all resources created during the install phase.
+
+    report.pdf – Final technical report detailing design decisions, performance evaluations, and scalability analysis.
+
+Requirements
+
+    OpenStack access with a valid openrc credentials file.
+
+    An SSH key for access and provisioning.
+
+    At least one unallocated floating IP for public access.
+
+    Python 3.x
+
+    Ansible
+
+    
+
+Deployment Instructions
+Installation Phase
+
+./install <openrc> <tag> <ssh_key>
+
+    Sets up the OpenStack environment (network, subnet, router, security groups).
+
+    Deploys 3 service nodes running service.py and SNMPd.
+
+    Deploys two proxy nodes with HAProxy/NGINX and Keepalived for load balancing and high availability.
+
+    Deploys a bastion node for SSH access and internal monitoring via ICMP.
+
+Operations Phase
+
+./operate <openrc> <tag> <ssh_key>
+
+    Reads the desired number of service nodes from server.conf.
+
+    Pings each node from the bastion to verify availability.
+
+    Automatically scales the number of service nodes up or down.
+
+    Reconfigures proxy load balancer and monitoring solution dynamically.
+
+Cleanup Phase
+
+./cleanup <openrc> <tag> <ssh_key>
+
+    Tears down all deployed nodes, networks, and security configurations.
+
+    Frees floating IPs and deletes SSH keypairs.
+
+Service Details
+
+    service.py: A simple HTTP service used to simulate backend behavior.
+
+    SNMPd: Installed on all service nodes for network monitoring.
+
+    PROXY Nodes: HAProxy/NGINX frontends for both services (TCP/5000 for HTTP and UDP/6000 for SNMP).
+
+    BASTION Node: Acts as a jump host for SSH and a central ping probe for node health checks.
+
+Monitoring & Scaling
+
+    Uses Telegraf + Grafana (on the bastion node) to monitor node metrics.
+
+    A custom script reads server.conf every 30 seconds and reconciles desired vs actual state.
+
+    Nodes are deemed healthy if they respond to ICMP pings from the bastion.
 

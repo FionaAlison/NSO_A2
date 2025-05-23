@@ -1,3 +1,0 @@
-Nodes,Mean_Total(ms),StdDev_Total(ms),RequestsPerSec,95Percentile(ms)
-1,78,3333,667,333,149,1073,67
-2,92,508,667,190,667,696,333

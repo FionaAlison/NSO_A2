@@ -198,7 +198,7 @@ EOF
       --network "${TAG}_network" \
       --user-data "$USERDATA_FILE" \
       --property "tag=${TAG}" \
-      "$NODE_NAME" &
+      "$NODE_NAME" &>/dev/null
     
     new_nodes+=("$NODE_NAME")
   done
@@ -250,8 +250,8 @@ EOF
   done
 
 
-  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml
-  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml &>/dev/null
+  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
   unset new_nodes
   rm -f "$TEMP_NEW_NODES_INVENTORY"
 }
@@ -272,7 +272,7 @@ scale_down() {
     if grep -q "^$node\s" "$INVENTORY_FILE"; then
       sed -i "/^$node\s/d" "$INVENTORY_FILE"
       log "Removed $node from inventory."
-      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml
+      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
     else
       log "Did not find $node in inventory to remove."
     fi
