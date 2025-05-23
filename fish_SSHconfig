@@ -1,47 +1,47 @@
 Host fish_bastion
-  HostName 188.240.223.149
+  HostName 188.240.223.46
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 
 Host fish_proxy1
-  HostName 192.168.42.70
+  HostName 192.168.42.149
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
-  ProxyJump ubuntu@188.240.223.149
+  ProxyJump ubuntu@188.240.223.46
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 
 Host fish_proxy2
-  HostName 192.168.42.150
+  HostName 192.168.42.76
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
-  ProxyJump ubuntu@188.240.223.149
+  ProxyJump ubuntu@188.240.223.46
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 
 Host fish_node1
-  HostName 192.168.42.121
+  HostName 192.168.42.6
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
-  ProxyJump ubuntu@188.240.223.149
+  ProxyJump ubuntu@188.240.223.46
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 
 Host fish_node2
-  HostName 192.168.42.82
+  HostName 192.168.42.143
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
-  ProxyJump ubuntu@188.240.223.149
+  ProxyJump ubuntu@188.240.223.46
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 
 Host fish_node3
-  HostName 192.168.42.65
+  HostName 192.168.42.48
   User ubuntu
   IdentityFile /home/fiona/.ssh/id_rsa
-  ProxyJump ubuntu@188.240.223.149
+  ProxyJump ubuntu@188.240.223.46
   StrictHostKeyChecking no
   UserKnownHostsFile /dev/null
 

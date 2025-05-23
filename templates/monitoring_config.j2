@@ -1,47 +1,31 @@
-# Telegraf Agent Configuration
 [agent]
   interval = "10s"
   round_interval = true
-  omit_hostname = false
   metric_batch_size = 1000
+  metric_buffer_limit = 10000
+  collection_jitter = "0s"
+  flush_interval = "10s"
+  flush_jitter = "0s"
+  precision = ""
+  hostname = "{{ inventory_hostname }}"
+  omit_hostname = false
 
-[global_tags]
-  role = "bastion"
-  environment = "dev"
-
-# Ping Check - Basic Node Availability
-[[inputs.ping]]
-  urls = [{% for host in groups['nodes'] %}"{{ hostvars[host]['ansible_default_ipv4']['address'] }}"{% if not loop.last %}, {% endif %}{% endfor %}]
-  count = 1
-  timeout = 1.0
-
-# SNMP Input - Deeper Node Health Stats
-[[inputs.snmp]]
-  agents = [{% for host in groups['nodes'] %}"{{ hostvars[host]['ansible_default_ipv4']['address'] }}"{% if not loop.last %}, {% endif %}{% endfor %}]
-  version = 2
-  community = "public"
-  timeout = "5s"
-  retries = 3
-
-  [[inputs.snmp.field]]
-    name = "hostname"
-    oid = "SNMPv2-MIB::sysName.0"
-    is_tag = true
-
-  [[inputs.snmp.table]]
-    name = "cpu"
-    oid = "HOST-RESOURCES-MIB::hrProcessorTable"
-
-  [[inputs.snmp.table]]
-    name = "memory"
-    oid = "HOST-RESOURCES-MIB::hrStorageTable"
-
-# Optional: HTTP Listener (only if needed; different port to avoid InfluxDB conflict)
-# Comment out if not using
-#[[inputs.http_listener]]
-#  service_address = ":8186"
-
-# Output - InfluxDB
 [[outputs.influxdb]]
   urls = ["http://localhost:8086"]
   database = "monitoring"
+  retention_policy = ""
+  write_consistency = "any"
+  timeout = "5s"
+
+[[inputs.cpu]]
+  percpu = true
+  totalcpu = true
+  collect_cpu_time = false
+  report_active = true
+
+[[inputs.mem]]
+[[inputs.disk]]
+[[inputs.diskio]]
+[[inputs.system]]
+[[inputs.net]]
+[[inputs.processes]]

@@ -342,6 +342,20 @@ while true; do
 
   log "Checking proxy status..."
   get_proxy_status "$BASTION_IP"
+  # Extract haproxy VIP
+  HAPROXY_VIP=$(grep "^haproxy_vip=" "$INVENTORY_FILE" | cut -d'=' -f2)
 
+  # Count nodes (adjust pattern to your inventory format)
+  REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY_FILE" | wc -l)
+
+  PORT=5000
+  SLEEP_SEC=1
+
+  for i in $(seq 1 $REQUESTS); do
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    response=$(curl -s http://$HAPROXY_VIP:$PORT/)
+    log "Request$i: $response"
+    sleep $SLEEP_SEC
+  done
   sleep 30
 done

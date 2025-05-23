@@ -1,8 +1,9 @@
 ---
-- name: Configure all nodes - Common Setup
+- name: Common Setup - All Nodes
   hosts: all
-  gather_facts: yes
   become: yes
+  gather_facts: yes
+  tags: [common]
   tasks:
     - name: Wait for apt lock
       shell: while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 5; done
@@ -13,22 +14,63 @@
           - python3
           - python3-pip
           - python3-flask
-          - snmpd
           - curl
           - vim
           - net-tools
+          - snmpd
         state: present
         update_cache: yes
 
-    - name: Allow monitoring port 9103
+    - name: Allow Telegraf port (9103)
       ufw:
         rule: allow
         port: '9103'
         proto: tcp
 
+- name: Telegraf Setup - All nodes except bastion
+  hosts: all:!bastion
+  become: yes
+  tags: [telegraf]
+  tasks:
+    - name: Add InfluxData GPG key
+      apt_key:
+        url: https://repos.influxdata.com/influxdata-archive_compat.key
+        state: present
+
+    - name: Add InfluxData APT repository
+      apt_repository:
+        repo: deb https://repos.influxdata.com/ubuntu focal stable
+        state: present
+        filename: influxdata
+
+    - name: Install Telegraf
+      apt:
+        name: telegraf
+        state: present
+        update_cache: yes
+
+    - name: Configure Telegraf
+      template:
+        src: templates/telegraf.conf.j2
+        dest: /etc/telegraf/telegraf.conf
+      notify: restart telegraf
+
+    - name: Enable and start Telegraf
+      systemd:
+        name: telegraf
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: restart telegraf
+      service:
+        name: telegraf
+        state: restarted
+
 - name: Configure bastion host - Monitoring stack
   hosts: bastion
   become: yes
+  tags: [bastion]
   tasks:
     - name: Add InfluxData GPG key
       apt_key:
@@ -60,18 +102,27 @@
           - grafana
         state: present
         update_cache: yes
+      register: apt_result
+      retries: 3
+      delay: 30
+      until: apt_result is succeeded
 
-    - name: Start and enable InfluxDB
-      service:
-        name: influxdb
-        state: started
-        enabled: yes
 
-    - name: Start and enable Grafana
-      service:
-        name: grafana-server
-        state: started
+    - name: Start and enable services
+      systemd:
+        name: "{{ item }}"
         enabled: yes
+        state: started
+      loop:
+        - influxdb
+        - grafana-server
+      
+
+    - name: Wait for InfluxDB to be ready
+      wait_for:
+        host: 127.0.0.1
+        port: 8086
+        timeout: 30
 
     - name: Create InfluxDB monitoring database
       shell: influx -execute "CREATE DATABASE monitoring"
@@ -122,11 +173,6 @@
         enabled: yes
         state: started
 
-    - name: Install SNMP utilities on bastion
-      apt:
-        name: snmp
-        state: present
-
     - name: Open monitoring ports in UFW
       ufw:
         rule: allow
@@ -146,6 +192,30 @@
     - name: Run iptables configuration script
       shell: /tmp/configure_iptables.sh
       become: yes
+
+    - name: Ensure Grafana override directory exists
+      file:
+        path: /etc/systemd/system/grafana-server.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Ensure override.conf file exists
+      copy:
+        dest: /etc/systemd/system/grafana-server.service.d/override.conf
+        content: |
+          [Service]
+          ProtectProc=invisible
+        force: no  # Do not overwrite if it already exists
+
+    - name: Comment out ProtectProc=invisible line in grafana config
+      replace:
+        path: /etc/systemd/system/grafana-server.service.d/override.conf
+        regexp: '^ProtectProc=invisible'
+        replace: '# ProtectProc=invisible'
+    - name: Reload systemd if override modified
+      systemd:
+        daemon_reload: yes
+
 
   handlers:
     - name: reload systemd
@@ -168,9 +238,11 @@
         name: health_endpoint
         state: restarted
 
+
 - name: Configure proxy nodes
   hosts: proxy
   become: yes
+  tags: [proxy]
   vars:
     vip_address: "{{ haproxy_vip_fixed }}"
     interface: "{{ ansible_default_ipv4.interface }}"
@@ -178,7 +250,6 @@
     keepalived_state: "{{ 'MASTER' if inventory_hostname == groups['proxy'][0] else 'BACKUP' }}"
     keepalived_password: "mysecretpassword"
     keepalived_peers: "{{ groups['proxy'] | difference([inventory_hostname]) | map('extract', hostvars, ['ansible_host']) | list }}"
-
   tasks:
     - name: Install HAProxy and Keepalived
       apt:
@@ -188,19 +259,19 @@
         state: present
         update_cache: yes
 
-    - name: Configure HAProxy with VIP support
+    - name: Configure HAProxy
       template:
         src: templates/haproxy.cfg.j2
         dest: /etc/haproxy/haproxy.cfg
       notify: restart haproxy
 
-    - name: Configure Keepalived with enhanced settings
+    - name: Configure Keepalived
       template:
         src: templates/keepalived.conf.j2
         dest: /etc/keepalived/keepalived.conf
       notify: restart keepalived
 
-    - name: Enable IP forwarding and non-local binding
+    - name: Enable IP forwarding and non-local bind
       sysctl:
         name: "{{ item.name }}"
         value: "{{ item.value }}"
@@ -209,7 +280,7 @@
         - { name: net.ipv4.ip_nonlocal_bind, value: '1' }
         - { name: net.ipv4.ip_forward, value: '1' }
 
-    - name: Create master notification script
+    - name: Create notification scripts
       copy:
         content: |
           #!/bin/bash
@@ -221,7 +292,7 @@
         dest: /etc/keepalived/master.sh
         mode: '0755'
 
-    - name: Create backup notification script
+    - name: Create backup script
       copy:
         content: |
           #!/bin/bash
@@ -231,7 +302,7 @@
         dest: /etc/keepalived/backup.sh
         mode: '0755'
 
-    - name: Create check_haproxy script
+    - name: Create HAProxy health check
       copy:
         content: |
           #!/bin/bash
@@ -247,12 +318,9 @@
         rule: allow
         port: "{{ item }}"
         proto: tcp
-      loop:
-        - 5000
-        - 161
-        - 80
-        - 443
-    - name: Allow VRRP traffic on UDP 112
+      loop: [5000, 161, 80, 443]
+
+    - name: Allow VRRP traffic
       ufw:
         rule: allow
         proto: udp
@@ -261,7 +329,7 @@
       loop: "{{ groups['proxy'] | map('extract', hostvars, ['ansible_default_ipv4', 'address']) | list }}"
       when: inventory_hostname != item
 
-    - name: Ensure Keepalived and HAProxy are enabled
+    - name: Enable proxy services
       service:
         name: "{{ item }}"
         enabled: yes
@@ -284,6 +352,7 @@
 - name: Configure service nodes
   hosts: nodes
   become: yes
+  tags: [nodes]
   tasks:
     - name: Deploy Flask service script
       copy:
@@ -291,13 +360,13 @@
         dest: /usr/local/bin/service.py
         mode: '0755'
 
-    - name: Configure SNMP daemon
+    - name: Configure SNMP
       template:
         src: templates/snmpd.conf.j2
         dest: /etc/snmp/snmpd.conf
       notify: restart snmpd
 
-    - name: Deploy Flask systemd service
+    - name: Create Flask service unit
       template:
         src: templates/service.service.j2
         dest: /etc/systemd/system/service.service
