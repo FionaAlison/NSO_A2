@@ -1,4 +1,12 @@
 ---
+- name: Wait for all nodes to be reachable
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Wait for SSH
+      wait_for_connection:
+        timeout: 300
+
 - name: Common Setup - All Nodes
   hosts: all
   become: yes

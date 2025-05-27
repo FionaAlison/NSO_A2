@@ -65,12 +65,12 @@ fi
 log "Checking existing floating IPs on ext-net"
 
 # List floating IPs on ext-net (filter by network name ext-net if needed)
-floating_ip_present=$(openstack floating ip list --network ext-net --status DOWN -c 'Floating IP Address' -f value)
+floating_ip_present=$(openstack floating ip list --network ext-net --status DOWN -c 'Floating IP Address' -f value 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
 
 # Save them temporarily
 echo "$floating_ip_present" > /tmp/floating_ips_list
 
-line_count=$(wc -l < /tmp/floating_ips_list)
+line_count=$(grep -c -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' /tmp/floating_ips_list)
 
 if (( line_count == 0 )); then
   log "No floating IPs found, creating 2 floating IPs"
@@ -230,7 +230,7 @@ echo "haproxy_vip=$FIP_HAPROXY" >> "$INVENTORY"
 echo "haproxy_vip_fixed=$VIP_FIXED_IP" >> "$INVENTORY"
 # Run Ansible playbook
 
-sleep 60
+
 log "Running Ansible playbook"
 ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml 
 

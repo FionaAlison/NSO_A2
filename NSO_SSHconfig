@@ -1,0 +1,47 @@
+Host NSO_bastion
+  HostName 46.254.9.237
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host NSO_proxy1
+  HostName 192.168.42.41
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@46.254.9.237
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host NSO_proxy2
+  HostName 192.168.42.25
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@46.254.9.237
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host NSO_node1
+  HostName 192.168.42.74
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@46.254.9.237
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host NSO_node2
+  HostName 192.168.42.86
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@46.254.9.237
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
+Host NSO_node3
+  HostName 192.168.42.236
+  User ubuntu
+  IdentityFile /home/fiona/.ssh/id_rsa
+  ProxyJump ubuntu@46.254.9.237
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+
