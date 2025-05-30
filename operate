@@ -11,6 +11,12 @@ fi
 OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
+# If SSH key path does NOT include a slash, assume it's in current directory
+if [[ "$SSH_KEY" != */* ]]; then
+  SSH_KEY="./$SSH_KEY"
+fi
+# Convert to absolute path
+SSH_KEY=$(readlink -f "$SSH_KEY")
 KEY_NAME="${TAG}_key"
 SEC_GROUP="${TAG}_secgroup"
 IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"

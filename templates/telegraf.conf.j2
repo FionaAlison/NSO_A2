@@ -42,7 +42,7 @@
 ###############################################################################
 
 [[outputs.influxdb]]
-  urls = ["http://{{ hostvars[groups['bastion'][0]]['ansible_host'] }}:8086"]
+  urls = ["http://{{ hostvars[groups['bastion'][0]]['ansible_default_ipv4']['address'] }}:8086"]
   database = "monitoring"
   timeout = "5s"
   # username = "telegraf"
