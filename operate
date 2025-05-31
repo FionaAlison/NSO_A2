@@ -23,7 +23,7 @@ IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"
 FLAVOR="1C-0.5GB-50GB"
 
 source "$OPENRC"
-
+SSH_CONFIG="${TAG}_SSHconfig"
 INVENTORY_FILE="${TAG}_inventory.ini"
 TEMP_NEW_NODES_INVENTORY="/tmp/${TAG}_new_nodes_inventory.ini"
 > "$TEMP_NEW_NODES_INVENTORY"
@@ -42,23 +42,14 @@ get_bastion_ip() {
 }
 
 get_node_ip_name_map() {
-  local node_prefix="${TAG}_node"
-
-  awk -v prefix="$node_prefix" '
-    /^\[nodes\]/ {flag=1; next}
-    /^\[/ {flag=0}
-    flag && $1 ~ "^"prefix {
-      host = $1
-      ip = ""
-      for (i = 2; i <= NF; i++) {
-        if ($i ~ /^ansible_host=/) {
-          split($i, a, "=")
-          ip = a[2]
-        }
-      }
-      if (ip != "") print ip, host
-    }' "$INVENTORY_FILE"
+  openstack server list --name "${TAG}_node" -f value -c Name -c Networks | \
+  while read -r name network; do
+    ip=$(echo "$network" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+")
+    echo "$name $ip"
+  done
 }
+
+
 
 get_healthy_nodes() {
   local bastion_ip="$1"
@@ -66,18 +57,7 @@ get_healthy_nodes() {
   local node_prefix="${TAG}_node"
 
   local node_ips
-  node_ips=$(awk -v prefix="$node_prefix" '
-    /^\[nodes\]/ {flag=1; next}
-    /^\[/ {flag=0}
-    flag && $1 ~ "^"prefix {
-      for (i = 1; i <= NF; i++) {
-        if ($i ~ /^ansible_host=/) {
-          split($i, a, "=")
-          print a[2]
-        }
-      }
-    }' "$INVENTORY_FILE")
-
+  node_ips=$(get_node_ip_name_map | awk -v prefix="$node_prefix" '$1 ~ "^"prefix { print $2 }')
   [[ -z "$node_ips" ]] && return
 
   printf "%s\n" $node_ips | ssh -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 "ubuntu@${bastion_ip}" \
@@ -92,22 +72,24 @@ print_unhealthy_nodes() {
 
   local map
   map=$(get_node_ip_name_map)
-
   local healthy_ips
   healthy_ips=$(get_healthy_nodes "$bastion_ip")
 
   declare -A ip_to_name=()
   declare -A healthy_lookup=()
 
-  # Build IP to hostname map
-  while read -r ip name; do
+    # Build IP to hostname map
+  while read -r name ip; do
     ip_to_name["$ip"]="$name"
   done <<< "$map"
 
-  # Build set of healthy IPs
-  while read -r ip; do
-    healthy_lookup["$ip"]=1
-  done <<< "$healthy_ips"
+
+  if [[ -n "$healthy_ips" ]]; then
+    while read -r ip; do
+      healthy_lookup["$ip"]=1
+    done <<< "$healthy_ips"
+  fi
+
 
   local unhealthy_nodes=()
 
@@ -136,38 +118,22 @@ get_proxy_status() {
   local hosts=()
   local ips=()
 
-  # Read host and IP into arrays
-  while read -r host ip; do
-    hosts+=("$host")
-    ips+=("$ip")
-  done < <(awk -v prefix="$proxy_prefix" '
-    /^\[proxy\]/ {flag=1; next}
-    /^\[/ {flag=0}
-    flag && $1 ~ "^"prefix {
-      host = $1
-      ip = ""
-      for (i = 2; i <= NF; i++) {
-        if ($i ~ /^ansible_host=/) {
-          split($i, a, "=")
-          ip = a[2]
-        }
-      }
-      if (ip != "") print host, ip
-    }' "$INVENTORY_FILE")
+  # Read host and IP from OpenStack into arrays
+  while read -r ip host; do
+    if [[ "$host" == "$proxy_prefix"* ]]; then
+      hosts+=("$host")
+      ips+=("$ip")
+    fi
+  done < <(openstack server list --name "$proxy_prefix" -f value -c Name -c Networks | \
+            while read -r name network; do
+              ip=$(echo "$network" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
+              echo "$ip $name"
+            done)
 
   [[ ${#hosts[@]} -eq 0 ]] && return
-
   # Loop over indices
-  for i in "${!hosts[@]}"; do
-    local host="${hosts[i]}"
-    local ip="${ips[i]}"
-
-    status=$(ssh -i "$SSH_KEY" \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o ConnectTimeout=5 \
-      -J "ubuntu@${bastion_ip}" \
-      "ubuntu@${ip}" \
+  for host in "${hosts[@]}"; do
+    status=$(ssh -F "$SSH_CONFIG" "${host}" \
       "sudo cat /var/run/keepalived.state 2>/dev/null" || echo "UNREACHABLE")
 
     echo "$host: ${status^^}"
@@ -232,11 +198,10 @@ EOF
 
   echo -e "\n[nodes]" >> "$TEMP_NEW_NODES_INVENTORY"
 
-    for NODE_NAME in "${new_nodes[@]}"; do
-
+  for NODE_NAME in "${new_nodes[@]}"; do
     IP=$(openstack server show "$NODE_NAME" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-    NODE_ENTRY="$NODE_NAME ansible_host=$IP ansible_user=ubuntu ansible_ssh_private_key_file=$SSH_KEY ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyJump=ubuntu@$BASTION_IP'"
 
+    NODE_ENTRY="$NODE_NAME"
     echo "$NODE_ENTRY" >> "$TEMP_NEW_NODES_INVENTORY"
 
     # Insert node into [nodes] section of the inventory file
@@ -253,11 +218,38 @@ EOF
         if (inserted) print entry
       }
     ' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+
+    # Add node to SSH config if not already present
+    if ! grep -q "^Host $NODE_NAME\b" "$SSH_CONFIG"; then
+      {
+        echo ""
+        echo "Host $NODE_NAME"
+        echo "  HostName $IP"
+        echo "  ProxyJump NSO_bastion"
+      } >> "$SSH_CONFIG"
+      #log "Added $NODE_NAME to SSH config."
+    fi
   done
 
 
-  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml &>/dev/null
-  ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
+  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml &>/dev/null
+  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
+  log "Validating ..."
+  PORT=5000
+  SLEEP_SEC=1
+
+  HAPROXY_VIP=$(grep "^haproxy_vip=" "$INVENTORY_FILE" | cut -d'=' -f2)
+  REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY_FILE" | wc -l)
+  for i in $(seq 1 $REQUESTS); do
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    response=$(curl -s http://$HAPROXY_VIP:$PORT/)
+    
+    # Extract hostname inside parentheses:
+    host=$(echo "$response" | grep -oP '\(\K[^)]+')
+    
+    log "Request$i: $host"
+    sleep $SLEEP_SEC
+  done
   unset new_nodes
   rm -f "$TEMP_NEW_NODES_INVENTORY"
 }
@@ -275,13 +267,52 @@ scale_down() {
   for node in "${old_nodes[@]}"; do
     log "Deleting $node"
     openstack server delete "$node" &
-    if grep -q "^$node\s" "$INVENTORY_FILE"; then
-      sed -i "/^$node\s/d" "$INVENTORY_FILE"
-      log "Removed $node from inventory."
-      ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
-    else
-      log "Did not find $node in inventory to remove."
+    if awk '
+      $0 ~ /^\[nodes\]/ { in_nodes = 1; next }
+      $0 ~ /^\[/ { in_nodes = 0 }
+      in_nodes && $0 == "'"$node"'" { found = 1 }
+      END { exit !found }
+    ' "$INVENTORY_FILE"; then
+
+      # Remove node from [nodes] section only
+      awk '
+        $0 ~ /^\[nodes\]/ { print; in_nodes = 1; next }
+        $0 ~ /^\[/ { in_nodes = 0 }
+        in_nodes && $0 == "'"$node"'" { next }
+        { print }
+      ' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+
+      #log "Removed $node from inventory."
+      
+      # SSH config cleanup (as before)
+      if grep -q "^Host $node\b" "$SSH_CONFIG"; then
+        awk -v host="Host $node" '
+          $0 == host { skip=1; next }
+          /^Host / { skip=0 }
+          !skip
+        ' "$SSH_CONFIG" > "${SSH_CONFIG}.tmp" && mv "${SSH_CONFIG}.tmp" "$SSH_CONFIG"
+        
+       # log "Removed $node from SSH config."
+      fi
+      #log "Did not find $node in inventory to remove."
     fi
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
+    log "Validating..."
+    PORT=5000
+    SLEEP_SEC=1
+
+    HAPROXY_VIP=$(grep "^haproxy_vip=" "$INVENTORY_FILE" | cut -d'=' -f2)
+    REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY_FILE" | wc -l)
+    for i in $(seq 1 $REQUESTS); do
+    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    response=$(curl -s http://$HAPROXY_VIP:$PORT/)
+    
+    # Extract hostname inside parentheses:
+    host=$(echo "$response" | grep -oP '\(\K[^)]+')
+    
+    log "Request$i: $host"
+    sleep $SLEEP_SEC
+  done
   done
 
   wait
@@ -308,8 +339,16 @@ cleanup_unhealthy_nodes() {
     log "Deleting instance: $node"
     openstack server delete "$node"
 
-    log "Removing $node from inventory: $INVENTORY_FILE"
+    #log "Removing $node from inventory: $INVENTORY_FILE"
     awk -v node="$node" '$1 != node' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
+    if grep -q "^Host $node\b" "$SSH_CONFIG"; then
+      awk -v host="Host $node" '
+        $0 == host { skip=1; next }
+        /^Host / { skip=0 }
+        !skip
+      ' "$SSH_CONFIG" > "${SSH_CONFIG}.tmp" && mv "${SSH_CONFIG}.tmp" "$SSH_CONFIG"
+    fi 
+    
   done <<< "$unhealthy_nodes"
 }
 
@@ -317,6 +356,7 @@ cleanup_unhealthy_nodes() {
 log "Starting operate mode (30-second checks)..."
 
 while true; do
+  
   DESIRED=$(get_desired_count)
   log "Target node count from config: $DESIRED"
 
@@ -348,20 +388,9 @@ while true; do
 
   log "Checking proxy status..."
   get_proxy_status "$BASTION_IP"
-  # Extract haproxy VIP
-  HAPROXY_VIP=$(grep "^haproxy_vip=" "$INVENTORY_FILE" | cut -d'=' -f2)
+  
+  
+  
 
-  # Count nodes (adjust pattern to your inventory format)
-  REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY_FILE" | wc -l)
-
-  PORT=5000
-  SLEEP_SEC=1
-
-  for i in $(seq 1 $REQUESTS); do
-    timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    response=$(curl -s http://$HAPROXY_VIP:$PORT/)
-    log "Request$i: $response"
-    sleep $SLEEP_SEC
-  done
   sleep 30
 done

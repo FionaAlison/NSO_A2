@@ -40,39 +40,7 @@ log() {
   echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
 }
 
-log "Starting deployment of $TAG"
-
-# Upload SSH key
-if ! openstack keypair show "$KEY_NAME" &>/dev/null; then
-  log "Adding keypair $KEY_NAME"
-  openstack keypair create --public-key "${SSH_KEY}.pub" "$KEY_NAME" &>/dev/null
-fi
-
-# Network setup
-log "Setting up network $NETWORK"
-openstack network show "$NETWORK" &>/dev/null || openstack network create "$NETWORK" &>/dev/null
-log "Setting up subnet $SUBNET"
-openstack subnet show "$SUBNET" &>/dev/null || openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 --gateway 192.168.42.1 "$SUBNET" &>/dev/null
-
-if ! openstack router show "$ROUTER" &>/dev/null; then
-  openstack router create "$ROUTER" &>/dev/null
-  openstack router set "$ROUTER" --external-gateway ext-net &>/dev/null
-  openstack router add subnet "$ROUTER" "$SUBNET" &>/dev/null
-  log "Router $ROUTER created and connected to subnet $SUBNET"
-fi
-
-# Security group
-if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
-  log "Creating security group $SEC_GROUP"
-  openstack security group create "$SEC_GROUP" &>/dev/null
-  for PORT in 22 80 443 5000 6000 9103 3000 8086; do  # Added ports 80 and 443 for web traffic
-    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-  done
-  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-fi
-
+log "Starting deployment of $TAG using $OPENRC for credentials."
 log "Checking existing floating IPs on ext-net"
 
 # List floating IPs on ext-net (filter by network name ext-net if needed)
@@ -102,11 +70,57 @@ else
   done
 fi
 
+# Upload SSH key
+if ! openstack keypair show "$KEY_NAME" &>/dev/null; then
+  log "Checking if we have ${KEY_NAME} availible."
+  log "Adding keypair $KEY_NAME"
+  openstack keypair create --public-key "${SSH_KEY}.pub" "$KEY_NAME" &>/dev/null
+fi
+
+# Network setup
+if ! openstack network show "$NETWORK" &>/dev/null; then
+  log "Did not detect ${NETWORK} in the OpenStack project, adding it."
+  openstack network create "$NETWORK" &>/dev/null
+  log "Added ${NETWORK}."
+fi
+
+if ! openstack subnet show "$SUBNET" &>/dev/null; then
+  log "Did not detect ${SUBNET} in the OpenStack project, adding it."
+  openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 --gateway 192.168.42.1 "$SUBNET" &>/dev/null
+  log "Added ${SUBNET}."
+fi
+
+if ! openstack router show "$ROUTER" &>/dev/null; then
+  log "Did not detect ${ROUTER} in the OpenStack project, adding it."
+  openstack router create "$ROUTER" &>/dev/null
+  openstack router set "$ROUTER" --external-gateway ext-net &>/dev/null
+  openstack router add subnet "$ROUTER" "$SUBNET" &>/dev/null
+  log "Added ${ROUTER}."
+fi
+
+log "Adding networks to router."
+sleep 1
+log "Done."
+
+
+# Security group
+if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
+  log "Creating security group $SEC_GROUP"
+  openstack security group create "$SEC_GROUP" &>/dev/null
+  for PORT in 22 80 443 5000 6000 9103 3000 8086; do  # Added ports 80 and 443 for web traffic
+    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  done
+  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+fi
+
+
 FIP_BASTION=$(cat floating1)
 FIP_HAPROXY=$(cat floating2)
 
-log "Using floating IP $FIP_BASTION for bastion"
-log "Using floating IP $FIP_HAPROXY for HAProxy VIP"
+#log "Using floating IP $FIP_BASTION for bastion"
+#log "Using floating IP $FIP_HAPROXY for HAProxy VIP"
 
 # Create virtual port for HAProxy VIP
 if ! openstack port show "$VIP_PORT" &>/dev/null; then
@@ -155,7 +169,11 @@ EOF
 
 # Launch VMs
 for NAME in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
-  launch_vm "$NAME"
+  if ! openstack server show "$NAME" &>/dev/null; then
+    log "Did not detect $NAME, launching it."
+    launch_vm "$NAME"
+  fi
+  
 done
 
 assign_fip() {
@@ -180,9 +198,24 @@ configure_proxy_ports() {
 configure_proxy_ports
 
 # Launch service nodes (no FIPs)
-for i in {1..3}; do
-  launch_vm "${TAG}_node$i"
+# Extract number of nodes from server.conf
+NODE_COUNT=$(head -n 1 servers.conf)
+
+# Fallback if not found or invalid
+if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]]; then
+  NODE_COUNT=3  # default
+fi
+
+log "Will need $NODE_COUNT nodes (server.conf), launching them."
+
+for i in $(seq 1 $NODE_COUNT); do
+  nodename="${TAG}_node$i"
+  if ! openstack server show "$nodename" &>/dev/null; then
+    log "Launching $nodename"
+    launch_vm "$nodename"
+  fi
 done
+
 
 # Wait for all VMs to be ACTIVE
 log "Waiting for all instances to be ACTIVE..."
@@ -221,7 +254,7 @@ for SERVER in "$PROXY1_NAME" "$PROXY2_NAME"; do
 done
 
 # Generate Node hosts
-for i in {1..3}; do
+for i in $(seq 1 $NODE_COUNT); do
   NODE="${TAG}_node$i"
   IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
   echo -e "\nHost $NODE\n  HostName $IP\n  ProxyJump $BASTION_NAME" >> "$SSH_CONFIG"
@@ -246,7 +279,7 @@ done
 
 echo -e "\n[nodes]" >> "$INVENTORY"
 
-for i in {1..3}; do
+for i in $(seq 1 $NODE_COUNT); do
   NODE="${TAG}_node$i"
   IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
   echo "$NODE" >> "$INVENTORY"
@@ -275,9 +308,13 @@ sleep 10
 
 for i in $(seq 1 $REQUESTS); do
   timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  response=$(curl -s http://$FIP_HAPROXY:$PORT/)
-  log "Request$i @ $timestamp: $response"
-  sleep $SLEEP_SEC
+  response=$(curl -s http://$HAPROXY_VIP:$PORT/)
+    
+    # Extract hostname inside parentheses:
+  host=$(echo "$response" | grep -oP '\(\K[^)]+')
+    
+  log "Request$i: $host"
 done
+
 
 echo "HAProxy VIP: $FIP_HAPROXY (maps to $VIP_FIXED_IP)"

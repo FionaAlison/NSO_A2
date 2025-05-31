@@ -2,7 +2,7 @@
 exec 2>/dev/null
 
 # Usage check
-if [ "$#" -ne 2 ]; then
+if [ "$#" -ne 3 ]; then
     echo "Usage: $0 <openrc> <tag>"
     exit 1
 fi
@@ -15,7 +15,8 @@ SEC_GROUP="${TAG}_secgroup"
 NETWORK="${TAG}_network"
 SUBNET="${TAG}_subnet"
 ROUTER="${TAG}_router"
-
+SSH_CONFIG="${TAG}_SSHconfig"
+INVENTORY_FILE="${TAG}_inventory.ini"
 source "$OPENRC"
 
 log() {
@@ -24,33 +25,47 @@ log() {
 
 log "[*] Starting cleanup for tag: $TAG"
 
+# Count servers to clean up
+NODE_COUNT=$(openstack server list --name "^${TAG}_" -f value -c ID | wc -l)
+log "We have $NODE_COUNT nodes releasing them"
+
 # Delete servers by name prefix (using tag as prefix)
-log "Deleting servers with name prefix '${TAG}_'..."
-for ID in $(openstack server list --name "^${TAG}_" -f value -c ID); do
-    log "Deleting server $ID"
-    openstack server delete "$ID"
+for SERVER_ID in $(openstack server list --name "^${TAG}_" -f value -c ID); do
+    NAME=$(openstack server show "$SERVER_ID" -f value -c name)
+    log "Releasing $NAME"
+    openstack server delete "$SERVER_ID"
 done
 
 # Wait for servers to be gone (timeout after 5 minutes)
-log "Waiting for servers to terminate..."
+log "Waiting for nodes to disapear......."
 timeout=300
 elapsed=0
 while openstack server list --name "^${TAG}_" -f value -c ID | grep -q .; do
     sleep 5
     elapsed=$((elapsed + 5))
     if [ "$elapsed" -ge "$timeout" ]; then
-        log "Timeout waiting for servers to terminate. Continuing cleanup."
+        log "Timeout waiting for nodes to terminate. Continuing cleanup."
         break
     fi
 done
+log "Nodes are gone."
 
 # Delete unused floating IPs that are DOWN (likely detached)
-log "Deleting unused floating IPs..."
-for FIP in $(openstack floating ip list --status DOWN -f value -c "ID"); do
-    log "Deleting floating IP $FIP"
-    openstack floating ip delete "$FIP"
-done
-
+# Function to delete floating IPs
+delete_floating_ips() {
+    floating_ips=$(openstack floating ip list -c ID -f value)
+    count=$(echo "$floating_ips" | wc -l)
+    if [[ -n "$floating_ips" ]]; then
+        for floating_ip in $floating_ips; do
+            log "Deleting floating IP $floating_ip"
+            openstack floating ip delete "$floating_ip" || log "Failed to delete floating IP $floating_ip"
+        done
+        log "Deleted $count floating IP(s) successfully"
+    else
+        log "Floating IPs not present"
+    fi
+}
+delete_floating_ips
 # Delete ports on the network to allow subnet deletion
 if openstack network show "$NETWORK" &>/dev/null; then
     log "Deleting ports on network $NETWORK..."
@@ -93,5 +108,18 @@ if openstack keypair show "$KEY_NAME" &>/dev/null; then
     log "Deleting keypair $KEY_NAME"
     openstack keypair delete "$KEY_NAME"
 fi
+# Clean up local temporary or generated files
+cleanup_local_files() {
+    files=("$SSH_CONFIG" "$INVENTORY_FILE" "floating1" "floating2")
 
+    log "Cleaning up local files..."
+    for file in "${files[@]}"; do
+        if [[ -f "$file" ]]; then
+            rm "$file" && log "Removed file $file" || log "Failed to remove file $file"
+        else
+            log "File $file not found, skipping"
+        fi
+    done
+}
+cleanup_local_files
 log "[✓] Cleanup complete."
