@@ -74,7 +74,6 @@ print_unhealthy_nodes() {
   map=$(get_node_ip_name_map)
   local healthy_ips
   healthy_ips=$(get_healthy_nodes "$bastion_ip")
-
   declare -A ip_to_name=()
   declare -A healthy_lookup=()
 
@@ -232,7 +231,7 @@ EOF
   done
 
 
-  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$TEMP_NEW_NODES_INVENTORY" reconfigure.yaml &>/dev/null
+  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" reconfigure.yaml &>/dev/null
   ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
   log "Validating ..."
   PORT=5000

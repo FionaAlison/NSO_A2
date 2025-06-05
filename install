@@ -1,5 +1,5 @@
 #!/bin/bash
-exec 2>/dev/null
+#exec 2>/dev/null
 # Usage check
 if [ "$#" -ne 3 ]; then
   echo "Usage: $0 <openrc> <tag> <ssh_private_key>"
@@ -211,7 +211,7 @@ log "Will need $NODE_COUNT nodes (server.conf), launching them."
 for i in $(seq 1 $NODE_COUNT); do
   nodename="${TAG}_node$i"
   if ! openstack server show "$nodename" &>/dev/null; then
-    log "Launching $nodename"
+    #log "Launching $nodename"
     launch_vm "$nodename"
   fi
 done
@@ -308,7 +308,7 @@ sleep 10
 
 for i in $(seq 1 $REQUESTS); do
   timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  response=$(curl -s http://$HAPROXY_VIP:$PORT/)
+  response=$(curl -s http://$FIP_HAPROXY:$PORT/)
     
     # Extract hostname inside parentheses:
   host=$(echo "$response" | grep -oP '\(\K[^)]+')

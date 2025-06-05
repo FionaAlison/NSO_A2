@@ -1,24 +1,46 @@
 - name: Wait for all nodes to be reachable
-  hosts: all
+  hosts: nodes
   gather_facts: no
   tasks:
     - name: Wait for SSH
       wait_for_connection:
         timeout: 300
 
+- name: Gather facts on bastion
+  hosts: bastion
+  gather_facts: yes
+
 - name: Reconfigure newly deployed service nodes
   hosts: nodes
   become: yes
   tasks:
-    - name: Update apt cache and install required packages
+    - name: Install base packages (excluding Flask)
       apt:
-        update_cache: yes
         name:
           - python3
           - python3-pip
-          - python3-flask
+          - curl
+          - vim
+          - net-tools
           - snmpd
         state: present
+        update_cache: yes
+
+    - name: Install Flask using pip
+      pip:
+        name: flask
+        executable: pip3
+
+    - name: Install Gunicorn using pip
+      pip:
+        name: gunicorn
+        executable: pip3
+
+    - name: Allow Telegraf port (9103)
+      ufw:
+        rule: allow
+        port: '9103'
+        proto: tcp
 
     - name: Deploy Flask service code
       copy:
@@ -57,6 +79,35 @@
         - 5000  # Flask service
         - 161   # SNMP
 
+    - name: Add InfluxData GPG key
+      apt_key:
+        url: https://repos.influxdata.com/influxdata-archive_compat.key
+        state: present
+
+    - name: Add InfluxData APT repository
+      apt_repository:
+        repo: deb https://repos.influxdata.com/ubuntu focal stable
+        state: present
+        filename: influxdata
+
+    - name: Install Telegraf
+      apt:
+        name: telegraf
+        state: present
+        update_cache: yes
+
+    - name: Configure Telegraf
+      template:
+        src: templates/telegraf.conf.j2
+        dest: /etc/telegraf/telegraf.conf
+      notify: restart telegraf
+
+    - name: Enable and start Telegraf
+      systemd:
+        name: telegraf
+        enabled: yes
+        state: started
+
   handlers:
     - name: restart snmpd
       service:
@@ -77,3 +128,8 @@
         name: service
         enabled: yes
         state: started
+
+    - name: restart telegraf
+      service:
+        name: telegraf
+        state: restarted    

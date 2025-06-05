@@ -1,13 +1,13 @@
 [Unit]
-Description=Project Service
+Description=Flask Web Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/python3 /usr/local/bin/service.py
+ExecStart=/usr/bin/env gunicorn -w 4 -b 0.0.0.0:5000 service:app
+WorkingDirectory=/usr/local/bin
 Restart=always
 User=root
-Environment=FLASK_ENV=production
-WorkingDirectory=/usr/local/bin
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
