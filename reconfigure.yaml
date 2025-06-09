@@ -1,14 +1,34 @@
 - name: Wait for all nodes to be reachable
-  hosts: nodes
+  hosts: all
   gather_facts: no
   tasks:
     - name: Wait for SSH
       wait_for_connection:
         timeout: 300
 
-- name: Gather facts on bastion
-  hosts: bastion
+- name: Gather facts 
+  hosts: all
   gather_facts: yes
+
+- name: Update HAProxy configuration and reload service
+  hosts: proxy
+  become: yes
+  tasks:
+    - name: Template the haproxy config
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - reload haproxy
+
+  handlers:
+    - name: reload haproxy
+      service:
+        name: haproxy
+        state: reloaded
 
 - name: Reconfigure newly deployed service nodes
   hosts: nodes
@@ -133,3 +153,5 @@
       service:
         name: telegraf
         state: restarted    
+
+

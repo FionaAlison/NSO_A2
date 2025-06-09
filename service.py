@@ -13,9 +13,14 @@ def index():
     client_ip = flask.request.remote_addr
     client_port = str(flask.request.environ.get('REMOTE_PORT'))
     hostname = h_name
-    Time= time.strftime("%H:%M:%S")
-    rand=str(random.randint(0,100))
-    return Time + " " + client_ip + ":" + client_port + " -- " + host + " (" + hostname + ") " + rand + "\n"
+    Time = time.strftime("%H:%M:%S")
+    rand = str(random.randint(0, 100))
+
+    base_str = f"{Time} {client_ip}:{client_port} -- {host} ({hostname}) {rand}"
+    # pad to 100 chars
+    fixed_length_response = base_str.ljust(100) + "\n"
+    return fixed_length_response
+
 @app.route('/health')
 def health():
     return 'OK', 200

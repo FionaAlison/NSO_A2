@@ -201,16 +201,6 @@
         - '8086'  # InfluxDB
         - '8125'  # Telegraf StatsD
 
-    - name: Upload iptables configuration script
-      copy:
-        src: configure-iptables.sh
-        dest: /tmp/configure_iptables.sh
-        mode: '0755'
-
-    - name: Run iptables configuration script
-      shell: /tmp/configure_iptables.sh
-      become: yes
-
     - name: Ensure Grafana override directory exists
       file:
         path: /etc/systemd/system/grafana-server.service.d
@@ -370,6 +360,7 @@
 - name: Configure service nodes
   hosts: nodes
   become: yes
+  gather_facts: no
   tags: [nodes]
   tasks:
     - name: Deploy Flask service script

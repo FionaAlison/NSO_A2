@@ -219,20 +219,21 @@ EOF
     ' "$INVENTORY_FILE" > "${INVENTORY_FILE}.tmp" && mv "${INVENTORY_FILE}.tmp" "$INVENTORY_FILE"
 
     # Add node to SSH config if not already present
-    if ! grep -q "^Host $NODE_NAME\b" "$SSH_CONFIG"; then
+    if ! grep -q "^Host $NODE_NAME\$" "$SSH_CONFIG"; then
       {
         echo ""
         echo "Host $NODE_NAME"
         echo "  HostName $IP"
-        echo "  ProxyJump NSO_bastion"
+        echo "  ProxyJump "$TAG"_bastion"
       } >> "$SSH_CONFIG"
       #log "Added $NODE_NAME to SSH config."
     fi
+
   done
 
 
   ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" reconfigure.yaml &>/dev/null
-  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
+  #ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml 
   log "Validating ..."
   PORT=5000
   SLEEP_SEC=1
@@ -265,7 +266,7 @@ scale_down() {
 
   for node in "${old_nodes[@]}"; do
     log "Deleting $node"
-    openstack server delete "$node" &
+    openstack server delete "$node" 
     if awk '
       $0 ~ /^\[nodes\]/ { in_nodes = 1; next }
       $0 ~ /^\[/ { in_nodes = 0 }
@@ -283,20 +284,21 @@ scale_down() {
 
       #log "Removed $node from inventory."
       
-      # SSH config cleanup (as before)
-      if grep -q "^Host $node\b" "$SSH_CONFIG"; then
-        awk -v host="Host $node" '
-          $0 == host { skip=1; next }
-          /^Host / { skip=0 }
+      if grep -q "^Host $node\$" "$SSH_CONFIG"; then
+        awk -v target="$node" '
+          $1 == "Host" && $2 == target { skip = 1; next }
+          $1 == "Host" && $2 != target { skip = 0 }
           !skip
         ' "$SSH_CONFIG" > "${SSH_CONFIG}.tmp" && mv "${SSH_CONFIG}.tmp" "$SSH_CONFIG"
-        
-       # log "Removed $node from SSH config."
+
+        #log "Removed $node from SSH config."
       fi
+
       #log "Did not find $node in inventory to remove."
     fi
-    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml &>/dev/null
-    log "Validating..."
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml  &>/dev/null
+  done
+  log "Validating..."
     PORT=5000
     SLEEP_SEC=1
 
@@ -312,8 +314,6 @@ scale_down() {
     log "Request$i: $host"
     sleep $SLEEP_SEC
   done
-  done
-
   wait
 }
 cleanup_unhealthy_nodes() {
