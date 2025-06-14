@@ -1,0 +1,23 @@
+Host *
+  User ubuntu
+  IdentityFile /home/fiona/Desktop/NSO_A2/id_rsa
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  PasswordAuthentication no
+  ForwardAgent yes
+
+Host NSO_bastion
+  HostName 185.52.156.82
+
+Host NSO_proxy1
+  HostName 192.168.42.109
+  ProxyJump NSO_bastion
+
+Host NSO_proxy2
+  HostName 192.168.42.243
+  ProxyJump NSO_bastion
+
+
+Host NSO_node4
+  HostName 192.168.42.104
+  ProxyJump NSO_bastion
