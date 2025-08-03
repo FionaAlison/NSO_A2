@@ -1,5 +1,4 @@
 #!/bin/bash
-#exec 2>/dev/null
 # Usage check
 if [ "$#" -ne 3 ]; then
   echo "Usage: $0 <openrc> <tag> <ssh_private_key>"
@@ -10,15 +9,12 @@ OPENRC="$1"
 TAG="$2"
 SSH_KEY="$3"
 
-# If SSH key path does NOT include a slash, assume it's in current directory
+# Validate SSH key
 if [[ "$SSH_KEY" != */* ]]; then
   SSH_KEY="./$SSH_KEY"
 fi
-
-# Convert to absolute path
 SSH_KEY=$(readlink -f "$SSH_KEY")
-
-# Now you can safely use $SSH_KEY when writing to inventory or ssh config
+[ ! -f "${SSH_KEY}.pub" ] && { echo "ERROR: ${SSH_KEY}.pub not found"; exit 1; }
 
 KEY_NAME="${TAG}_key"
 NETWORK="${TAG}_network"
@@ -27,20 +23,31 @@ ROUTER="${TAG}_router"
 BASTION_NAME="${TAG}_bastion"
 PROXY1_NAME="${TAG}_proxy1"
 PROXY2_NAME="${TAG}_proxy2"
-VIP_PORT="${TAG}_vip"  # New virtual port for HAProxy
+VIP_PORT="${TAG}_vip"
 IMAGE_NAME="Ubuntu 20.04 Focal Fossa x86_64"
 FLAVOR="1C-0.5GB-50GB"
 SEC_GROUP="${TAG}_secgroup"
 SSH_CONFIG="${TAG}_SSHconfig"
 INVENTORY="${TAG}_inventory.ini"
+LOG_FILE="openstack.log"
 
 source "$OPENRC"
 
 log() {
-  echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
+  echo "$(date +'%Y-%m-%d %H:%M:%S') $*" | tee -a "$LOG_FILE"
 }
 
-log "Starting deployment of $TAG using $OPENRC for credentials."
+log "Starting deployment of $TAG using $OPENRC"
+
+# Cache resource checks
+mapfile -t EXISTING_NETWORKS < <(openstack network list -f value -c Name 2>>"$LOG_FILE")
+mapfile -t EXISTING_SUBNETS < <(openstack subnet list -f value -c Name 2>>"$LOG_FILE")
+mapfile -t EXISTING_ROUTERS < <(openstack router list -f value -c Name 2>>"$LOG_FILE")
+mapfile -t EXISTING_KEYPAIRS < <(openstack keypair list -f value -c Name 2>>"$LOG_FILE")
+mapfile -t EXISTING_SG < <(openstack security group list -f value -c Name 2>>"$LOG_FILE")
+mapfile -t EXISTING_PORTS < <(openstack port list -f value -c Name 2>>"$LOG_FILE")
+
+# Floating IPs
 log "Checking existing floating IPs on ext-net"
 
 # List floating IPs on ext-net (filter by network name ext-net if needed)
@@ -51,103 +58,81 @@ echo "$floating_ip_present" > /tmp/floating_ips_list
 
 line_count=$(grep -c -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' /tmp/floating_ips_list)
 
+# Reuse existing or create new floating IPs
 if (( line_count == 0 )); then
   log "No floating IPs found, creating 2 floating IPs"
-  fip1=$(openstack floating ip create ext-net -f value -c floating_ip_address)
-  fip2=$(openstack floating ip create ext-net -f value -c floating_ip_address)
-  echo "$fip1" > floating1
-  echo "$fip2" > floating2
+  FIP_BASTION=$(openstack floating ip create ext-net -f value -c floating_ip_address)
+  FIP_HAPROXY=$(openstack floating ip create ext-net -f value -c floating_ip_address)
 elif (( line_count == 1 )); then
   log "Only 1 floating IP found, reusing it and creating 1 more"
-  read -r fip1 < /tmp/floating_ips_list
-  echo "$fip1" > floating1
-  fip2=$(openstack floating ip create ext-net -f value -c floating_ip_address)
-  echo "$fip2" > floating2
+  read -r FIP_BASTION < /tmp/floating_ips_list
+  FIP_HAPROXY=$(openstack floating ip create ext-net -f value -c floating_ip_address)
 else
   log "Multiple floating IPs found, reusing first two"
-  head -n 2 /tmp/floating_ips_list | nl | while read -r idx ip; do
-    echo "$ip" > floating$idx
-  done
+  mapfile -t ips < <(head -n 2 /tmp/floating_ips_list)
+  FIP_BASTION="${ips[0]}"
+  FIP_HAPROXY="${ips[1]}"
 fi
 
-# Upload SSH key
-if ! openstack keypair show "$KEY_NAME" &>/dev/null; then
-  log "Checking if we have ${KEY_NAME} availible."
+# Save to files
+echo "$FIP_BASTION" > floating1
+echo "$FIP_HAPROXY" > floating2
+
+
+log "FIP_BASTION=$FIP_BASTION, FIP_HAPROXY=$FIP_HAPROXY"
+
+# Resource creation
+if ! [[ " ${EXISTING_KEYPAIRS[*]} " =~ " ${KEY_NAME} " ]]; then
   log "Adding keypair $KEY_NAME"
-  openstack keypair create --public-key "${SSH_KEY}.pub" "$KEY_NAME" &>/dev/null
+  openstack keypair create --public-key "${SSH_KEY}.pub" "$KEY_NAME" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create keypair"; exit 1; }
 fi
 
-# Network setup
-if ! openstack network show "$NETWORK" &>/dev/null; then
+if ! [[ " ${EXISTING_NETWORKS[*]} " =~ " ${NETWORK} " ]]; then
   log "Did not detect ${NETWORK} in the OpenStack project, adding it."
-  openstack network create "$NETWORK" &>/dev/null
-  log "Added ${NETWORK}."
+  openstack network create "$NETWORK" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create network"; exit 1; }
 fi
 
-if ! openstack subnet show "$SUBNET" &>/dev/null; then
+if ! [[ " ${EXISTING_SUBNETS[*]} " =~ " ${SUBNET} " ]]; then
   log "Did not detect ${SUBNET} in the OpenStack project, adding it."
-  openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 --gateway 192.168.42.1 "$SUBNET" &>/dev/null
-  log "Added ${SUBNET}."
+  openstack subnet create --network "$NETWORK" --subnet-range 192.168.42.0/24 --gateway 192.168.42.1 "$SUBNET" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create subnet"; exit 1; }
 fi
 
-if ! openstack router show "$ROUTER" &>/dev/null; then
+if ! [[ " ${EXISTING_ROUTERS[*]} " =~ " ${ROUTER} " ]]; then
   log "Did not detect ${ROUTER} in the OpenStack project, adding it."
-  openstack router create "$ROUTER" &>/dev/null
-  openstack router set "$ROUTER" --external-gateway ext-net &>/dev/null
-  openstack router add subnet "$ROUTER" "$SUBNET" &>/dev/null
-  log "Added ${ROUTER}."
+  openstack router create "$ROUTER" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create router"; exit 1; }
+  openstack router set "$ROUTER" --external-gateway ext-net >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to set router gateway"; exit 1; }
+  openstack router add subnet "$ROUTER" "$SUBNET" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to add subnet to router"; exit 1; }
 fi
 
-log "Adding networks to router."
-sleep 1
-log "Done."
-
-
-# Security group
-if ! openstack security group show "$SEC_GROUP" &>/dev/null; then
+if ! [[ " ${EXISTING_SG[*]} " =~ " ${SEC_GROUP} " ]]; then
   log "Creating security group $SEC_GROUP"
-  openstack security group create "$SEC_GROUP" &>/dev/null
-  for PORT in 22 80 443 5000 6000 9103 3000 8086; do  # Added ports 80 and 443 for web traffic
-    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group create "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create security group"; exit 1; }
+  for PORT in 22 80 443 5000 9103 3000 8086 8404; do
+    openstack security group rule create --proto tcp --dst-port "$PORT" --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create TCP rule for port $PORT"; exit 1; }
   done
-  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
-  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" &>/dev/null
+  openstack security group rule create --proto udp --dst-port 8125 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create UDP rule for port 8125"; exit 1; }
+  openstack security group rule create --proto udp --dst-port 6000 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create UDP rule for port 6000"; exit 1; }
+  openstack security group rule create --proto udp --dst-port 161 --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create UDP rule for port 6000"; exit 1; }
+  openstack security group rule create --proto vrrp --ingress --remote-ip 192.168.42.0/24 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create VRRP rule"; exit 1; }
+  openstack security group rule create --proto icmp --ingress --remote-ip 0.0.0.0/0 "$SEC_GROUP" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create ICMP rule"; exit 1; }
 fi
 
-
-FIP_BASTION=$(cat floating1)
-FIP_HAPROXY=$(cat floating2)
-
-#log "Using floating IP $FIP_BASTION for bastion"
-#log "Using floating IP $FIP_HAPROXY for HAProxy VIP"
-
-# Create virtual port for HAProxy VIP
-if ! openstack port show "$VIP_PORT" &>/dev/null; then
-  log "Creating virtual port $VIP_PORT for HAProxy VIP"
-  openstack port create --network "$NETWORK" --fixed-ip subnet="$SUBNET" --no-security-group "$VIP_PORT" &>/dev/null
-  
-  # Assign floating IP to the virtual port
-  openstack floating ip set --port "$VIP_PORT" "$FIP_HAPROXY" &>/dev/null
-  log "Assigned floating IP $FIP_HAPROXY to virtual port $VIP_PORT"
-  
-  # Get the fixed IP of the virtual port
-  VIP_FIXED_IP=$(openstack port show "$VIP_PORT" -f value -c fixed_ips | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
-  log "Virtual port $VIP_PORT has fixed IP $VIP_FIXED_IP"
+if ! [[ " ${EXISTING_PORTS[*]} " =~ " ${VIP_PORT} " ]]; then
+  log "Creating virtual port $VIP_PORT"
+  openstack port create --network "$NETWORK" --fixed-ip subnet="$SUBNET" --no-security-group "$VIP_PORT" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to create VIP port"; exit 1; }
+  openstack floating ip set --port "$VIP_PORT" "$FIP_HAPROXY" >>"$LOG_FILE" 2>&1 || { log "ERROR: Failed to associate floating IP with VIP port"; exit 1; }
+  VIP_FIXED_IP=$(openstack port show "$VIP_PORT" -f value -c fixed_ips 2>>"$LOG_FILE" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
+  [ -z "$VIP_FIXED_IP" ] && { log "ERROR: Failed to retrieve VIP fixed IP"; exit 1; }
 fi
 
-# Launch VM with cloud-init user data
 launch_vm() {
   NAME="$1"
-  log "Launching $NAME"
-
   USERDATA_FILE=$(mktemp)
   cat > "$USERDATA_FILE" <<EOF
 #cloud-config
 ssh_authorized_keys:
   - $(cat ${SSH_KEY}.pub)
 EOF
-
   openstack server create \
     --image "$IMAGE_NAME" \
     --flavor "$FLAVOR" \
@@ -155,86 +140,104 @@ EOF
     --security-group "$SEC_GROUP" \
     --network "$NETWORK" \
     --user-data "$USERDATA_FILE" \
-    "$NAME" &>/dev/null
-
-  while true; do
-    STATUS=$(openstack server show "$NAME" -f value -c status)
-    [ "$STATUS" == "ACTIVE" ] && break
-    [ "$STATUS" == "ERROR" ] && { log "ERROR: Failed to launch $NAME"; exit 1; }
-    sleep 3
-  done
-
-  rm -f "$USERDATA_FILE"
+    "$NAME" > /dev/null 2>&1 &
+  echo "$USERDATA_FILE"
 }
 
-# Launch VMs
-for NAME in "$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME"; do
-  if ! openstack server show "$NAME" &>/dev/null; then
-    log "Did not detect $NAME, launching it."
-    launch_vm "$NAME"
+VMS=("$BASTION_NAME" "$PROXY1_NAME" "$PROXY2_NAME")
+NODE_COUNT=$(head -n 1 servers.conf)
+if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]]; then
+  NODE_COUNT=3
+fi
+for i in $(seq 1 $NODE_COUNT); do
+  VMS+=("${TAG}_node$i")
+done
+USERDATA_FILES=()
+for NAME in "${VMS[@]}"; do
+  if ! openstack server show "$NAME" >>"$LOG_FILE" 2>&1; then
+    USERDATA_FILES+=($(launch_vm "$NAME"))
   fi
-  
 done
 
+log "Waiting for all instances to be ACTIVE..."
+for i in {1..600}; do
+  all_active=true
+  for NAME in "${VMS[@]}"; do
+    STATUS=$(openstack server show "$NAME" -f value -c status 2>>"$LOG_FILE" || echo "NOT_FOUND")
+    if [ "$STATUS" != "ACTIVE" ]; then
+      if [ "$STATUS" == "ERROR" ]; then
+        log "ERROR: Server $NAME in ERROR state"
+        cat "${NAME}.log" >>"$LOG_FILE"
+        exit 1
+      elif [ "$STATUS" == "NOT_FOUND" ] || [ "$STATUS" == "BUILD" ]; then
+        #log "Server $NAME status: $STATUS"
+        all_active=false
+      fi
+    fi
+  done
+  if $all_active; then
+    break
+  fi
+  sleep 1
+done
+if ! $all_active; then
+  log "ERROR: Not all servers reached ACTIVE state within 600 seconds"
+  for NAME in "${VMS[@]}"; do
+    STATUS=$(openstack server show "$NAME" -f value -c status 2>>"$LOG_FILE" || echo "NOT_FOUND")
+    log "$NAME status: $STATUS"
+    [ -f "${NAME}.log" ] && cat "${NAME}.log" >>"$LOG_FILE"
+  done
+  exit 1
+fi
+
+for FILE in "${USERDATA_FILES[@]}"; do
+  rm -f "$FILE"
+done
+
+# Assign floating IPs with retries
 assign_fip() {
   NAME="$1"
   IP="$2"
-  PORT_ID=$(openstack port list --server "$NAME" -f value -c ID | head -n1)
-  openstack floating ip set --port "$PORT_ID" "$IP" &>/dev/null
-  log "Assigned floating IP $IP to $NAME"
+  for attempt in {1..5}; do
+    PORT_ID=$(openstack port list --server "$NAME" -f value -c ID 2>>"$LOG_FILE" | head -n1)
+    if [ -n "$PORT_ID" ]; then
+      openstack floating ip set --port "$PORT_ID" "$IP" >>"$LOG_FILE" 2>&1 && { log "Assigned floating IP $IP to $NAME"; return 0; } || log "Failed to assign floating IP $IP to $NAME, attempt $attempt"
+    else
+      log "No port found for $NAME, attempt $attempt"
+    fi
+    sleep 5
+  done
+  log "ERROR: Failed to assign floating IP to $NAME after 5 attempts"
+  exit 1
 }
-
 assign_fip "$BASTION_NAME" "$FIP_BASTION"
 
-# Configure HAProxy ports to allow traffic from VIP
+# Configure HAProxy ports
 configure_proxy_ports() {
   for PROXY in "$PROXY1_NAME" "$PROXY2_NAME"; do
-    PROXY_IP=$(openstack server show "$PROXY" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}')
-    PORT_ID=$(openstack port list --fixed-ip ip-address="$PROXY_IP" -f value -c ID)
-    openstack port set --allowed-address ip-address="$VIP_FIXED_IP" "$PORT_ID" &>/dev/null
-    log "Configured port $PORT_ID ($PROXY) to allow traffic from VIP $VIP_FIXED_IP"
+    for attempt in {1..5}; do
+      PROXY_IP=$(openstack server show "$PROXY" -f value -c addresses 2>>"$LOG_FILE" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+      if [ -n "$PROXY_IP" ]; then
+        PORT_ID=$(openstack port list --fixed-ip ip-address="$PROXY_IP" -f value -c ID 2>>"$LOG_FILE")
+        if [ -n "$PORT_ID" ]; then
+          openstack port set --allowed-address ip-address="$VIP_FIXED_IP" "$PORT_ID" >>"$LOG_FILE" 2>&1 && { log "Configured port $PORT_ID ($PROXY) to allow traffic from VIP $VIP_FIXED_IP"; break; } || log "Failed to configure port for $PROXY, attempt $attempt"
+        else
+          log "No port found for $PROXY_IP ($PROXY), attempt $attempt"
+        fi
+      else
+        log "No IP found for $PROXY, attempt $attempt"
+      fi
+      sleep 5
+    done
+    [ -z "$PROXY_IP" ] || [ -z "$PORT_ID" ] && { log "ERROR: Failed to configure port for $PROXY after 5 attempts"; exit 1; }
   done
 }
 configure_proxy_ports
 
-# Launch service nodes (no FIPs)
-# Extract number of nodes from server.conf
-NODE_COUNT=$(head -n 1 servers.conf)
-
-# Fallback if not found or invalid
-if ! [[ "$NODE_COUNT" =~ ^[0-9]+$ ]]; then
-  NODE_COUNT=3  # default
-fi
-
-log "Will need $NODE_COUNT nodes (server.conf), launching them."
-
-for i in $(seq 1 $NODE_COUNT); do
-  nodename="${TAG}_node$i"
-  if ! openstack server show "$nodename" &>/dev/null; then
-    #log "Launching $nodename"
-    launch_vm "$nodename"
-  fi
-done
-
-
-# Wait for all VMs to be ACTIVE
-log "Waiting for all instances to be ACTIVE..."
-while openstack server list --name "^${TAG}_" -f value -c Status | grep -vq ACTIVE; do sleep 40; done
-
-refresh_known_hosts() {
-  for ip in $(openstack server list --name "^${TAG}_" -f value -c Networks | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}'); do
-      ssh-keygen -f "$HOME/.ssh/known_hosts" -R "$ip" > /dev/null 2>&1
-      ssh-keyscan -H "$ip" >> "$HOME/.ssh/known_hosts" 2> /dev/null
-  done
-}
-refresh_known_hosts
-
-
+# SSH config and inventory generation
 log "Generating SSH config to $SSH_CONFIG"
 rm -f "$SSH_CONFIG"
-
-# Global SSH settings
-cat >> "$SSH_CONFIG" <<EOF
+cat > "$SSH_CONFIG" <<EOF
 Host *
   User ubuntu
   IdentityFile $SSH_KEY
@@ -242,64 +245,69 @@ Host *
   UserKnownHostsFile /dev/null
   PasswordAuthentication no
   ForwardAgent yes
+
+Host $BASTION_NAME
+  HostName $FIP_BASTION
 EOF
-
-# Bastion Host
-echo -e "\nHost $BASTION_NAME\n  HostName $FIP_BASTION" >> "$SSH_CONFIG"
-
-# Generate Proxy hosts
 for SERVER in "$PROXY1_NAME" "$PROXY2_NAME"; do
-  IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-  echo -e "\nHost $SERVER\n  HostName $IP\n  ProxyJump $BASTION_NAME" >> "$SSH_CONFIG"
+  for attempt in {1..5}; do
+    IP=$(openstack server show "$SERVER" -f value -c addresses 2>>"$LOG_FILE" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+    if [ -n "$IP" ]; then
+      echo -e "\nHost $SERVER\n  HostName $IP\n  ProxyJump $BASTION_NAME" >> "$SSH_CONFIG"
+      break
+    else
+      log "No IP found for $SERVER, attempt $attempt"
+    fi
+    sleep 5
+  done
+  [ -z "$IP" ] && { log "ERROR: Failed to get IP for $SERVER after 5 attempts"; exit 1; }
 done
-
-# Generate Node hosts
 for i in $(seq 1 $NODE_COUNT); do
   NODE="${TAG}_node$i"
-  IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-  echo -e "\nHost $NODE\n  HostName $IP\n  ProxyJump $BASTION_NAME" >> "$SSH_CONFIG"
+  for attempt in {1..5}; do
+    IP=$(openstack server show "$NODE" -f value -c addresses 2>>"$LOG_FILE" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+    if [ -n "$IP" ]; then
+      echo -e "\nHost $NODE\n  HostName $IP\n  ProxyJump $BASTION_NAME" >> "$SSH_CONFIG"
+      break
+    else
+      log "No IP found for $NODE, attempt $attempt"
+    fi
+    sleep 5
+  done
+  [ -z "$IP" ] && { log "ERROR: Failed to get IP for $NODE after 5 attempts"; exit 1; }
 done
-
-log "SSH config generation complete."
 
 log "Generating Ansible inventory to $INVENTORY"
 rm -f "$INVENTORY"
-
 cat > "$INVENTORY" <<EOF
 [bastion]
-$BASTION_NAME 
+$BASTION_NAME
 
 [proxy]
+$PROXY1_NAME
+$PROXY2_NAME
+
+[nodes]
 EOF
-
-for SERVER in "$PROXY1_NAME" "$PROXY2_NAME"; do
-  IP=$(openstack server show "$SERVER" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-  echo "$SERVER" >> "$INVENTORY"
-done
-
-echo -e "\n[nodes]" >> "$INVENTORY"
-
 for i in $(seq 1 $NODE_COUNT); do
-  NODE="${TAG}_node$i"
-  IP=$(openstack server show "$NODE" -f value -c addresses | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
-  echo "$NODE" >> "$INVENTORY"
+  echo "${TAG}_node$i" >> "$INVENTORY"
 done
-
 cat >> "$INVENTORY" <<EOF
 
 [all:vars]
 haproxy_vip=$FIP_HAPROXY
 haproxy_vip_fixed=$VIP_FIXED_IP
+snmp_community={{ vault_snmp_community | default('public') }}
 EOF
 
-
-
+# Run Ansible playbook
 log "Running Ansible playbook"
-#ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i "$INVENTORY" install-playbook.yaml
-ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY" install-playbook.yaml
+if ! ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY" install-playbook.yaml --skip-tags "haproxy-reconfigure" --forks 10 >>"$LOG_FILE" 2>&1; then
+  log "ERROR: Ansible playbook failed"
+  exit 1
+fi
 
 log "Deployment complete. HAProxy can be accessed via $FIP_HAPROXY"
-
 # Validate node responses
 REQUESTS=$(awk '/\[nodes\]/ {flag=1; next} /^\[/ {flag=0} flag && NF' "$INVENTORY" | wc -l)
 PORT=5000
@@ -315,6 +323,4 @@ for i in $(seq 1 $REQUESTS); do
     
   log "Request$i: $host"
 done
-
-
 echo "HAProxy VIP: $FIP_HAPROXY (maps to $VIP_FIXED_IP)"

@@ -2,16 +2,22 @@
 - name: Wait for all nodes to be reachable
   hosts: all
   gather_facts: no
+  tags: always
   tasks:
     - name: Wait for SSH
       wait_for_connection:
         timeout: 300
 
-- name: Common Setup - All Nodes
+- name: Gather facts 
   hosts: all
+  tags: always
+  gather_facts: yes
+
+- name: Common Setup - All Nodes
+  hosts: nodes
   become: yes
   gather_facts: yes
-  tags: [common]
+  tags: common
   tasks:
 
     - name: Wait for apt lock
@@ -39,18 +45,20 @@
         name: gunicorn
         executable: pip3
 
+
+- name: Telegraf Setup - All nodes except bastion
+  hosts: all:!bastion
+  become: yes
+  gather_facts: yes
+  tags: telegraf
+  tasks:
+
     - name: Allow Telegraf port (9103)
       ufw:
         rule: allow
         port: '9103'
         proto: tcp
 
-
-- name: Telegraf Setup - All nodes except bastion
-  hosts: all:!bastion
-  become: yes
-  tags: [telegraf]
-  tasks:
     - name: Add InfluxData GPG key
       apt_key:
         url: https://repos.influxdata.com/influxdata-archive_compat.key
@@ -89,7 +97,7 @@
 - name: Configure bastion host - Monitoring stack
   hosts: bastion
   become: yes
-  tags: [bastion]
+  tags: bastion
   tasks:
     - name: Add InfluxData GPG key
       apt_key:
@@ -116,6 +124,9 @@
     - name: Install monitoring stack
       apt:
         name:
+          - curl
+          - vim
+          - net-tools
           - influxdb
           - telegraf
           - grafana
@@ -171,6 +182,35 @@
         dest: /etc/grafana/provisioning/datasources/influxdb.yaml
         mode: '0644'
       notify: restart grafana
+
+    - name: Ensure Grafana dashboards directory exists
+      file:
+        path: /var/lib/grafana/dashboards/
+        state: directory
+        mode: '0755'
+
+    - name: Upload Grafana dashboard JSON
+      copy:
+        src: templates/telegraf_system_dashboard.json
+        dest: /var/lib/grafana/dashboards/telegraf_system_dashboard.json
+        mode: '0644'
+
+    - name: Create dashboard provisioning config
+      copy:
+        dest: /etc/grafana/provisioning/dashboards/dashboard.yaml
+        content: |
+          apiVersion: 1
+          providers:
+            - name: 'system'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              editable: true
+              options:
+                path: /var/lib/grafana/dashboards
+      notify: restart grafana
+
 
     - name: Deploy health check script
       copy:
@@ -250,7 +290,7 @@
 - name: Configure proxy nodes
   hosts: proxy
   become: yes
-  tags: [proxy]
+  tags: proxy
   vars:
     vip_address: "{{ haproxy_vip_fixed }}"
     interface: "{{ ansible_default_ipv4.interface }}"
@@ -264,6 +304,7 @@
         name:
           - haproxy
           - keepalived
+          - nginx
         state: present
         update_cache: yes
 
@@ -278,6 +319,13 @@
         src: templates/keepalived.conf.j2
         dest: /etc/keepalived/keepalived.conf
       notify: restart keepalived
+
+    - name: Configure NGINX for SNMP UDP proxy
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: restart nginx
+  
 
     - name: Enable IP forwarding and non-local bind
       sysctl:
@@ -326,7 +374,7 @@
         rule: allow
         port: "{{ item }}"
         proto: tcp
-      loop: [5000, 161, 80, 443]
+      loop: [5000, 80, 443]
 
     - name: Allow VRRP traffic
       ufw:
@@ -346,6 +394,20 @@
         - keepalived
         - haproxy
 
+    - name: Open SNMP UDP proxy port
+      ufw:
+        rule: allow
+        port: 6000
+        proto: udp
+
+    - name: Enable and start NGINX
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+
+
   handlers:
     - name: restart haproxy
       service:
@@ -356,12 +418,18 @@
       service:
         name: keepalived
         state: restarted
+    
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+
 
 - name: Configure service nodes
   hosts: nodes
   become: yes
   gather_facts: no
-  tags: [nodes]
+  tags: nodes
   tasks:
     - name: Deploy Flask service script
       copy:
@@ -404,3 +472,28 @@
         name: service
         enabled: yes
         state: started
+
+- name: Update HAProxy configuration and reload service
+  hosts: proxy
+  gather_facts: yes
+  become: yes
+  tags:
+    - haproxy-reconfigure
+  tasks:
+    - name: Template the haproxy config
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: 0644
+      notify:
+        - reload haproxy
+      tags: haproxy_config  
+
+  handlers:
+    - name: reload haproxy
+      service:
+        name: haproxy
+        state: reloaded
+      tags: haproxy_reload  

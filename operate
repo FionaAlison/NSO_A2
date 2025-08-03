@@ -232,7 +232,7 @@ EOF
   done
 
 
-  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" reconfigure.yaml &>/dev/null
+  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "common, telegraf, haproxy-reconfigure, nodes"
   #ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml 
   log "Validating ..."
   PORT=5000
@@ -296,7 +296,7 @@ scale_down() {
 
       #log "Did not find $node in inventory to remove."
     fi
-    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml  &>/dev/null
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "haproxy-reconfigure"
   done
   log "Validating..."
     PORT=5000

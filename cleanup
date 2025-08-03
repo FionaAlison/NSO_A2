@@ -110,7 +110,7 @@ if openstack keypair show "$KEY_NAME" &>/dev/null; then
 fi
 # Clean up local temporary or generated files
 cleanup_local_files() {
-    files=("$SSH_CONFIG" "$INVENTORY_FILE" "floating1" "floating2")
+    files=("$SSH_CONFIG" "$INVENTORY_FILE" "floating1" "floating2" "openstack.log")
 
     log "Cleaning up local files..."
     for file in "${files[@]}"; do

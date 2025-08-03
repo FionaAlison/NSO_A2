@@ -1,0 +1,21 @@
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+    worker_connections 768;
+}
+
+stream {
+    upstream snmp_nodes {
+        {% for host in groups['nodes'] %}
+         server {{ hostvars[host]['ansible_default_ipv4']['address'] }}:161;
+        {% endfor %}
+    }
+
+    server {
+        listen 6000 udp;
+        proxy_pass snmp_nodes;
+    }
+}

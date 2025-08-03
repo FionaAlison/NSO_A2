@@ -1,0 +1,72 @@
+{
+  "id": null,
+  "uid": null,
+  "title": "System Metrics Dashboard",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s",
+  "panels": [
+    {
+      "title": "CPU Usage per Host",
+      "type": "graph",
+      "id": 1,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "A",
+          "rawQuery": true,
+          "query": "SELECT 100 - mean(\"usage_idle\") AS \"CPU Usage\" FROM \"cpu\" WHERE $timeFilter GROUP BY time($__interval), \"host\" fill(null)"
+        }
+      ]
+    },
+    {
+      "title": "Memory Usage",
+      "type": "graph",
+      "id": 2,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 9 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "B",
+          "rawQuery": true,
+          "query": "SELECT mean(\"used_percent\") FROM \"mem\" WHERE $timeFilter GROUP BY time($__interval), \"host\" fill(null)"
+        }
+      ]
+    },
+    {
+      "title": "Disk Usage",
+      "type": "graph",
+      "id": 3,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 18 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "C",
+          "rawQuery": true,
+          "query": "SELECT mean(\"used_percent\") FROM \"disk\" WHERE $timeFilter GROUP BY time($__interval), \"host\" fill(null)"
+        }
+      ]
+    },
+    {
+      "title": "Network Traffic",
+      "type": "graph",
+      "id": 4,
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 27 },
+      "datasource": "InfluxDB",
+      "targets": [
+        {
+          "refId": "D",
+          "rawQuery": true,
+          "query": "SELECT mean(\"bytes_recv\") AS \"In\" FROM \"net\" WHERE $timeFilter GROUP BY time($__interval), \"host\" fill(null)"
+        },
+        {
+          "refId": "E",
+          "rawQuery": true,
+          "query": "SELECT mean(\"bytes_sent\") AS \"Out\" FROM \"net\" WHERE $timeFilter GROUP BY time($__interval), \"host\" fill(null)"
+        }
+      ]
+    }
+  ]
+}
