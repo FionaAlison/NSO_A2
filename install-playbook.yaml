@@ -14,7 +14,7 @@
   gather_facts: yes
 
 - name: Common Setup - All Nodes
-  hosts: nodes
+  hosts: all
   become: yes
   gather_facts: yes
   tags: common
@@ -45,6 +45,37 @@
         name: gunicorn
         executable: pip3
 
+- name: Common Setup - All Nodes
+  hosts: nodes
+  become: yes
+  gather_facts: yes
+  tags: nodes-reconfigure
+  tasks:
+
+    - name: Wait for apt lock
+      shell: while sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 5; done
+
+    - name: Install base packages (excluding Flask)
+      apt:
+        name:
+          - python3
+          - python3-pip
+          - curl
+          - vim
+          - net-tools
+          - snmpd
+        state: present
+        update_cache: yes
+
+    - name: Install Flask using pip
+      pip:
+        name: flask
+        executable: pip3
+
+    - name: Install Gunicorn using pip
+      pip:
+        name: gunicorn
+        executable: pip3
 
 - name: Telegraf Setup - All nodes except bastion
   hosts: all:!bastion
@@ -497,3 +528,25 @@
         name: haproxy
         state: reloaded
       tags: haproxy_reload  
+
+- name: Update NGINX configuration and reload service
+  hosts: proxy
+  gather_facts: yes
+  become: yes
+  tags:
+    - nginx-reconfigure
+  tasks:
+    - name: Template the nginx config
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: 0644
+      notify: reload nginx
+
+  handlers:
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded

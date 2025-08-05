@@ -302,7 +302,7 @@ EOF
 
 # Run Ansible playbook
 log "Running Ansible playbook"
-if ! ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY" install-playbook.yaml --skip-tags "haproxy-reconfigure" --forks 10 >>"$LOG_FILE" 2>&1; then
+if ! ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY" install-playbook.yaml --skip-tags "haproxy-reconfigure, nodes-reconfigure, nginx-reconfigure" --forks 10 >>"$LOG_FILE" 2>&1; then
   log "ERROR: Ansible playbook failed"
   exit 1
 fi
