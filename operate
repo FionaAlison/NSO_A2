@@ -27,7 +27,7 @@ SSH_CONFIG="${TAG}_SSHconfig"
 INVENTORY_FILE="${TAG}_inventory.ini"
 TEMP_NEW_NODES_INVENTORY="/tmp/${TAG}_new_nodes_inventory.ini"
 > "$TEMP_NEW_NODES_INVENTORY"
-
+LOG_FILE="openstack.log"
 log() {
   echo "$(date +'%Y-%m-%d %H:%M:%S') $*"
 }
@@ -232,7 +232,7 @@ EOF
   done
 
 
-  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "nodes-reconfigure, telegraf, haproxy-reconfigure, nodes, nginx-reconfigure"
+  ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "nodes-reconfigure, telegraf, haproxy-reconfigure, nodes, nginx-reconfigure" >>"$LOG_FILE" 2>&1
   #ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" update-haproxy.yaml 
   log "Validating ..."
   PORT=5000
@@ -296,7 +296,7 @@ scale_down() {
 
       #log "Did not find $node in inventory to remove."
     fi
-    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "haproxy-reconfigure, nginx-reconfigure"
+    ANSIBLE_HOST_KEY_CHECKING=False ANSIBLE_SSH_COMMON_ARGS="-F $SSH_CONFIG" ansible-playbook -i "$INVENTORY_FILE" install-playbook.yaml --tags "haproxy-reconfigure, nginx-reconfigure" >>"$LOG_FILE" 2>&1
   done
   log "Validating..."
     PORT=5000
